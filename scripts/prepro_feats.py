@@ -53,6 +53,11 @@ import misc.resnet as resnet
 def main(params):
   net = getattr(resnet, params['model'])()
   net.load_state_dict(torch.load(os.path.join(params['model_root'],params['model']+'.pth')))
+  # Or load using network
+  # if params['model'] == 'resnet101':
+  #   net.load_state_dict(models.resnet101(pretrained=True))
+  # elif params['model'] == 'resnet152':
+  #   net.load_state_dict(models.resnet152(pretrained=True))
   my_resnet = myResnet(net)
   my_resnet.cuda()
   my_resnet.eval()
@@ -80,7 +85,9 @@ def main(params):
 
     I = I.astype('float32')/255.0
     I = torch.from_numpy(I.transpose([2,0,1])).cuda()
-    I = Variable(preprocess(I), volatile=True)
+    # I = Variable(preprocess(I), volatile=True)
+    with torch.no_grad():
+        I = Variable(preprocess(I))
     tmp_fc, tmp_att = my_resnet(I, params['att_size'])
     # write to pkl
     np.save(os.path.join(dir_fc, str(img['cocoid'])), tmp_fc.data.cpu().float().numpy())
