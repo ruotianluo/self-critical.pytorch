@@ -4,3 +4,6 @@
 [submodule "coco-caption"]
 	path = coco-caption
 	url = https://github.com/tylin/coco-caption.git
+[submodule "cider"]
+	path = cider
+	url = https://github.com/ruotianluo/cider.git
