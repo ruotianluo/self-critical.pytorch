@@ -150,6 +150,10 @@ def parse_opt():
                     help='The reward weight from cider')
     parser.add_argument('--bleu_reward_weight', type=float, default=0,
                     help='The reward weight from bleu4')
+    parser.add_argument('--force_short', type=float, default=0,
+                    help='Penalty for long sentences.')
+    parser.add_argument('--force_long', type=float, default=0,
+                    help='Penalty for short sentences.')
 
 
     # Structure_loss

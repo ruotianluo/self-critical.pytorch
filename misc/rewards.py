@@ -106,5 +106,11 @@ def get_scores(data, gen_result, opt):
         bleu_scores = 0
 
     scores = opt.cider_reward_weight * cider_scores + opt.bleu_reward_weight * bleu_scores
+    if getattr(opt, 'force_short'):
+        scores -= np.array([abs(len(res[i][0].split(' ')) - 4) / 6 * opt.force_short for i in range(batch_size)])
+        print('Average length:', np.array([len(res[i][0].split(' '))-1 for i in range(batch_size)]).mean())
+    if getattr(opt, 'force_long'):
+        scores -= np.array([abs(len(res[i][0].split(' ')) - 16) / 6 * opt.force_long for i in range(batch_size)])
+        print('Average length:', np.array([len(res[i][0].split(' '))-1 for i in range(batch_size)]).mean())
 
     return scores

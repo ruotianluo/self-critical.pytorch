@@ -50,6 +50,7 @@ def language_eval(dataset, preds, preds_n, eval_kwargs, split):
     preds_filt = [p for p in preds if p['image_id'] in valids]
     mean_perplexity = sum([_['perplexity'] for _ in preds_filt]) / len(preds_filt)
     mean_entropy = sum([_['entropy'] for _ in preds_filt]) / len(preds_filt)
+    mean_length = sum([len(_['caption'].split(' ')) for _ in preds_filt]) / len(preds_filt)
     print('using %d/%d predictions' % (len(preds_filt), len(preds)))
     json.dump(preds_filt, open(cache_path, 'w')) # serialize to temporary json file. Sigh, COCO API...
 
@@ -65,6 +66,7 @@ def language_eval(dataset, preds, preds_n, eval_kwargs, split):
     # Add mean perplexity
     out['perplexity'] = mean_perplexity
     out['entropy'] = mean_entropy
+    out['length'] = mean_length
 
     imgToEval = cocoEval.imgToEval
     for k in list(imgToEval.values())[0]['SPICE'].keys():
