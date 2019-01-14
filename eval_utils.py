@@ -147,6 +147,7 @@ def eval_split(model, crit, loader, eval_kwargs={}):
         with torch.no_grad():
             seq, seq_logprobs = model(fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')
             seq = seq.data
+            eos_prob = F.softmax(seq_logprobs, dim=2)[:,:,0]
             entropy = - (F.softmax(seq_logprobs, dim=2) * seq_logprobs).sum(2).sum(1) / ((seq>0).float().sum(1)+1)
             perplexity = - seq_logprobs.gather(2, seq.unsqueeze(2)).squeeze(2).sum(1) / ((seq>0).float().sum(1)+1)
         
@@ -158,7 +159,11 @@ def eval_split(model, crit, loader, eval_kwargs={}):
         sents = utils.decode_sequence(loader.get_vocab(), seq)
 
         for k, sent in enumerate(sents):
-            entry = {'image_id': data['infos'][k]['id'], 'caption': sent, 'perplexity': perplexity[k].item(), 'entropy': entropy[k].item()}
+            entry = {'image_id': data['infos'][k]['id'],\
+                     'caption': sent,
+                     'eos_prob': eos_prob[k].tolist(),
+                     'perplexity': perplexity[k].item(),
+                     'entropy': entropy[k].item()}
             if eval_kwargs.get('dump_path', 0) == 1:
                 entry['file_name'] = data['infos'][k]['file_path']
             predictions.append(entry)
