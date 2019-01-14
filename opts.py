@@ -154,6 +154,9 @@ def parse_opt():
                     help='Penalty for long sentences.')
     parser.add_argument('--force_long', type=float, default=0,
                     help='Penalty for short sentences.')
+    parser.add_argument('--grammar_rules', type=float, default=0,
+                    help='Penalty for incorrct grammar.')
+                    
 
 
     # Structure_loss

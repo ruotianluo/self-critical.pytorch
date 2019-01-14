@@ -113,4 +113,8 @@ def get_scores(data, gen_result, opt):
         scores -= np.array([abs(len(res[i][0].split(' ')) - 16) / 6 * opt.force_long for i in range(batch_size)])
         print('Average length:', np.array([len(res[i][0].split(' '))-1 for i in range(batch_size)]).mean())
 
+    if getattr(opt, 'grammar_rules'):
+        bad_ends = {'7961':'a', '2597':'an', '3029':'the', '290':'with', '4437':'of', 'on':'702', 'in':'3636'}
+        tmp = [res[i][0].split(' ') for i in range(batch_size)]
+        scores -= np.array([tmp[i][-2] in bad_ends if len(tmp[i]) > 2 else False for i in range(batch_size)]).astype('float32') * opt.grammar_rules
     return scores
