@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,6 +25,15 @@ import misc.utils as utils
 from torch.nn.utils.rnn import PackedSequence, pack_padded_sequence, pad_packed_sequence
 
 from .CaptionModel import CaptionModel
+
+def get_LP_CONF():
+    lp_conf = os.getenv('LP_CONF', '1_100_1e-1_sgd')
+    lp_conf = lp_conf.split('_')
+    return {'kl_w': float(lp_conf[0]),
+            'iter': int(lp_conf[1]),
+            'lr': float(lp_conf[2]),
+            'optim': lp_conf[3]}
+LP_CONF = get_LP_CONF()
 
 def sort_pack_padded_sequence(input, lengths):
     sorted_lengths, indices = torch.sort(lengths, descending=True)
@@ -82,6 +92,28 @@ class AttModel(CaptionModel):
             self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
             self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
         self.ctx2att = nn.Linear(self.rnn_size, self.att_hid_size)
+
+        if os.getenv('LENGTH_PREDICT'):
+            if 'cls' in os.getenv('LENGTH_PREDICT'):
+                if '2l' in os.getenv('LENGTH_PREDICT'):
+                    self.len_fc = nn.Sequential(
+                        nn.Linear(self.rnn_size, 300),
+                        nn.ReLU(),
+                        nn.Linear(300, 20)
+                    )
+                else:
+                    self.len_fc = nn.Linear(self.rnn_size, 20)
+            elif 'reg' in os.getenv('LENGTH_PREDICT'):
+                if '2l' in os.getenv('LENGTH_PREDICT'):
+                    self.len_fc = nn.Sequential(
+                        nn.Linear(self.rnn_size, 300),
+                        nn.ReLU(),
+                        nn.Linear(300, 1)
+                    )
+                else:
+                    self.len_fc = nn.Linear(self.rnn_size, 1)
+
+            self.states = []
 
     def init_hidden(self, bsz):
         weight = next(self.parameters())
@@ -143,15 +175,53 @@ class AttModel(CaptionModel):
 
         return outputs
 
-    def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state, output_logsoftmax=1):
+    def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state, output_logsoftmax=1, len_pred=False):
         # 'it' contains a word index
         xt = self.embed(it)
 
         output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
+        if os.getenv('LENGTH_PREDICT') and len_pred:
+            self.states.append(self.len_fc(output.detach()))
+            # self.states.append(self.len_fc(output))
+
         if output_logsoftmax:
             logprobs = F.log_softmax(self.logit(output), dim=1)
         else:
             logprobs = self.logit(output)
+
+        if hasattr(self, 'desired_length') and os.getenv('LENGTH_PREDICT') and len_pred:
+            # print(self.vocab[str(logprobs.max(-1)[1].item())])
+            # import pdb;pdb.set_trace()
+            def obj_func(input):
+                len_obj = F.log_softmax(self.len_fc(input))[:, self.desired_length]
+                # len_obj = F.log_softmax(self.len_fc(input)).gather(1, self.desired_length.unsqueeze(1)).squeeze(1) # higher
+                dist_obj = F.kl_div(F.log_softmax(self.logit(input), dim=1), logprobs.exp(), reduction='none')
+                # _grad_l = torch.autograd.grad(len_obj.sum(), input, retain_graph=True)[0]
+                # _grad_d = torch.autograd.grad(dist_obj.sum(), input, retain_graph=True)[0]
+                # import pdb;pdb.set_trace()
+                return (len_obj - LP_CONF['kl_w'] * dist_obj.sum(1)).sum()
+
+            def get_grad(func, input):
+                input.requires_grad = True
+                input.retain_grad()
+                with torch.enable_grad():
+                    grad = torch.autograd.grad(func(input), input)
+                input.requires_grad = False
+                return grad[0]
+
+            new_state = output.data.clone()
+            for i in range(LP_CONF['iter']):
+                new_state += LP_CONF['lr'] * get_grad(obj_func, new_state)
+
+            logprobs = F.log_softmax(self.logit(new_state), dim=1)
+            # print(self.vocab[str(logprobs.max(-1)[1].item())])
+
+            if self.desired_length > 0:
+                # print(self.len_fc(output).max(1)[1] - self.desired_length)
+                # print(self.len_fc(new_state).max(1)[1] - self.desired_length)
+                self.desired_length -= 1
+
+            state[0][0].copy_(new_state)
 
         return logprobs, state
 
@@ -195,6 +265,7 @@ class AttModel(CaptionModel):
         output_logsoftmax = opt.get('output_logsoftmax', 1)
         decoding_constraint = opt.get('decoding_constraint', 0)
         block_trigrams = opt.get('block_trigrams', 0)
+        len_pred = opt.get('len_pred', 0)
         if beam_size > 1:
             return self._sample_beam(fc_feats, att_feats, att_masks, opt)
 
@@ -217,7 +288,7 @@ class AttModel(CaptionModel):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size*sample_n, dtype=torch.long)
 
-            logprobs, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, output_logsoftmax=output_logsoftmax)
+            logprobs, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, output_logsoftmax=output_logsoftmax, len_pred=len_pred)
             
             if decoding_constraint and t > 0:
                 tmp = logprobs.new_zeros(logprobs.size())

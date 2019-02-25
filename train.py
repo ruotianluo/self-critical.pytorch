@@ -94,7 +94,10 @@ def train(opt):
         optimizer = utils.build_optimizer(model.parameters(), opt)
     # Load the optimizer
     if vars(opt).get('start_from', None) is not None and os.path.isfile(os.path.join(opt.start_from,"optimizer.pth")):
-        optimizer.load_state_dict(torch.load(os.path.join(opt.start_from, 'optimizer.pth')))
+        try:
+            optimizer.load_state_dict(torch.load(os.path.join(opt.start_from, 'optimizer.pth')))
+        except:
+            pass
 
     while True:
         if epoch_done:
@@ -157,9 +160,47 @@ def train(opt):
         elif not sc_flag:
             loss = crit(dp_model(fc_feats, att_feats, labels, att_masks), labels[:,1:], masks[:,1:])
         else:
-            gen_result, sample_logprobs = dp_model(fc_feats, att_feats, att_masks, opt={'sample_max':0}, mode='sample')
+            gen_result, sample_logprobs = dp_model(fc_feats, att_feats, att_masks, opt={'sample_max':0, 'len_pred':os.getenv('LENGTH_PREDICT', 0)}, mode='sample')
             reward = get_self_critical_reward(dp_model, fc_feats, att_feats, att_masks, data, gen_result, opt)
             loss = rl_crit(sample_logprobs, gen_result.data, torch.from_numpy(reward).float().cuda())
+            if os.getenv('LENGTH_PREDICT'):
+                states = dp_model.module.states
+                dp_model.module.states = []
+
+                def length_loss(input, seq):
+                    
+                    input = input + [input[-1]] * (model.seq_length-len(input))
+                    input = input[:model.seq_length]
+                    input = torch.stack(input, dim=1)
+                    # input = input.reshape(-1, input.shape[-1])
+                    mask = (seq>0).float()
+                    mask = torch.cat([mask.new(mask.size(0), 1).fill_(1), mask[:, :-1]], 1)
+
+                    target = (mask.sum(1,keepdim=True) - mask.cumsum(1)).long()
+
+                    if 'cls' in os.getenv('LENGTH_PREDICT'): # classificaiton
+                        # import pdb;pdb.set_trace()
+                        output = torch.nn.functional.cross_entropy(\
+                            input.reshape(-1, input.shape[-1]),
+                            target.reshape(-1),reduction='none') * mask.reshape(-1)
+                        print('length_prediction:', (((input.max(-1)[1] == target).float() * mask).sum() / torch.sum(mask)).item())
+                        print('regression:', (((input.max(-1)[1].float() - target.float()).pow(2) * mask).sum() / torch.sum(mask)).item())
+                    elif 'reg' in os.getenv('LENGTH_PREDICT'): # regression
+                        output = torch.nn.functional.mse_loss(\
+                            input.reshape(-1),
+                            target.reshape(-1).float(),reduction='none') * mask.reshape(-1)
+                        print('length_prediction:', (((input.squeeze(-1).round().long() == target).float() * mask).sum() / torch.sum(mask)).item())
+                        print('regression:', (((input.squeeze(-1) - target.float()).pow(2) * mask).sum() / torch.sum(mask)).item())
+                    else:
+                        raise Exception
+                    output = torch.sum(output) / torch.sum(mask)
+
+                    return output
+
+                len_loss = length_loss(states, gen_result)
+
+                # loss += len_loss
+                loss = len_loss
 
         loss.backward()
         utils.clip_gradient(optimizer, opt.grad_clip)
@@ -208,7 +249,7 @@ def train(opt):
             eval_kwargs = {'split': 'val',
                             'dataset': opt.input_json}
             eval_kwargs.update(vars(opt))
-            val_loss, predictions, lang_stats = eval_utils.eval_split(dp_model, crit, loader, eval_kwargs)
+            val_loss, predictions, lang_stats = eval_utils.eval_split(model, crit, loader, eval_kwargs)
 
             if opt.reduce_on_plateau:
                 if 'CIDEr' in lang_stats:

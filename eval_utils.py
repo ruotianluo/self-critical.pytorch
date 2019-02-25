@@ -121,6 +121,10 @@ def eval_split(model, crit, loader, eval_kwargs={}):
     loss_evals = 1e-8
     predictions = []
     n_predictions = [] # when sample_n > 1
+    if os.getenv('LENGTH_PREDICT'):
+        lenpred_acc = 0
+        lenpred_accs = [0 for _ in range(20)]
+        lenpred_l2 = 0
     while True:
         data = loader.get_batch(split)
         n = n + loader.batch_size
@@ -133,6 +137,59 @@ def eval_split(model, crit, loader, eval_kwargs={}):
 
             with torch.no_grad():
                 loss = crit(model(fc_feats, att_feats, labels, att_masks), labels[:,1:], masks[:,1:]).item()
+
+                if os.getenv('LENGTH_PREDICT'):
+                    gen_result, sample_logprobs = model(fc_feats, att_feats, att_masks, opt={'sample_max':0, 'len_pred':1, 'block_trigrams': 1}, mode='sample')
+                        
+                    states = model.states
+                    model.states = []
+
+                    def length_loss(input, seq):
+                        
+                        input = input + [input[-1]] * (model.seq_length-len(input))
+                        input = input[:model.seq_length]
+                        input = torch.stack(input, dim=1)
+                        # input = input.reshape(-1, input.shape[-1])
+                        mask = (seq>0).float()
+                        mask = torch.cat([mask.new(mask.size(0), 1).fill_(1), mask[:, :-1]], 1)
+
+                        target = (mask.sum(1,keepdim=True) - mask.cumsum(1)).long()
+
+                        if 'cls' in os.getenv('LENGTH_PREDICT'): # classificaiton
+                            # import pdb;pdb.set_trace()
+                            output = torch.nn.functional.cross_entropy(\
+                                input.reshape(-1, input.shape[-1]),
+                                target.reshape(-1),reduction='none') * mask.reshape(-1)
+                            lenpred_prob = input.softmax(2).gather(2, target.unsqueeze(2)).squeeze(2)
+                            _acc = (((input.max(-1)[1] == target).float() * mask).sum() / torch.sum(mask)).item()
+                            _accs = [0 for _ in range(20)]
+                            for t in range(min(20, input.shape[1])):
+                                _accs[t] += (((input[:,t].max(-1)[1] == target[:,t]).float() * mask[:,t]).sum() / torch.sum(mask[:,t])).item()
+                            _reg = (((input.max(-1)[1].float() - target.float()).pow(2) * mask).sum() / torch.sum(mask)).item()
+                            print('length_prediction:', _acc)
+                            print('regression:', _reg)
+                        elif 'reg' in os.getenv('LENGTH_PREDICT'): # regression
+                            output = torch.nn.functional.mse_loss(\
+                                input.reshape(-1),
+                                target.reshape(-1).float(),reduction='none') * mask.reshape(-1)
+                            
+                            _acc = (((input.squeeze(-1).round().long() == target).float() * mask).sum() / torch.sum(mask)).item()
+                            _accs = [0 for _ in range(20)]
+                            _reg = (((input.squeeze(-1) - target.float()).pow(2) * mask).sum() / torch.sum(mask)).item()
+                            print('length_prediction:', _acc)
+                            print('regression:', _reg)
+                            lenpred_prob = 0
+                        else:
+                            raise Exception
+                        output = torch.sum(output) / torch.sum(mask)
+
+                        return _acc, _accs, _reg, lenpred_prob
+
+                    _acc, _accs, _reg, ___ = length_loss(states, gen_result)
+                    lenpred_acc += _acc
+                    lenpred_accs = [lenpred_accs[_] + _accs[_] for _ in range(20)]
+                    lenpred_l2 += _reg
+            
             loss_sum = loss_sum + loss
             loss_evals = loss_evals + 1
 
@@ -145,7 +202,32 @@ def eval_split(model, crit, loader, eval_kwargs={}):
         fc_feats, att_feats, att_masks = tmp
         # forward the model to also get generated samples for each image
         with torch.no_grad():
-            seq, seq_logprobs = model(fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')
+            if os.getenv('LENGTH_PREDICT') and os.getenv('DESIRED_LENGTH'):
+                # import pdb;pdb.set_trace()
+                desired_sents = [{} for _ in range(len(fc_feats))]
+                for desired_length in os.getenv('DESIRED_LENGTH').split(','):
+                    model.vocab = loader.get_vocab()
+                    model.vocab['0'] = '<eos>'
+                    model.desired_length = int(desired_length)
+                    seq, __ = model(fc_feats, att_feats, att_masks, opt={'sample_max':1, 'len_pred':1}, mode='sample')
+                    _sents = utils.decode_sequence(loader.get_vocab(), seq, remove_bad_endings)
+                    for _s in _sents:
+                        print(_s)
+                    for k, _s in enumerate(_sents):
+                        desired_sents[k][int(desired_length)] = _s
+                    del model.desired_length
+                    model.states = []
+            # temporary
+            
+            if eval_kwargs['beam_size'] == 1 and os.getenv('LENGTH_PREDICT'):
+                eval_kwargs.update({'len_pred':1})
+                seq, seq_logprobs = model(fc_feats, att_feats, att_masks, opt={'sample_max':1, 'len_pred':1}, mode='sample')
+                _acc, _accs, _reg, lenpred_prob = length_loss(model.states, seq)
+                model.states = []
+            else:
+                seq, seq_logprobs = model(fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')
+                lenpred_prob = torch.zeros(seq.shape)
+
             seq = seq.data
             eos_prob = F.softmax(seq_logprobs, dim=2)[:,:,0]
             entropy = - (F.softmax(seq_logprobs, dim=2) * seq_logprobs).sum(2).sum(1) / ((seq>0).float().sum(1)+1)
@@ -162,8 +244,11 @@ def eval_split(model, crit, loader, eval_kwargs={}):
             entry = {'image_id': data['infos'][k]['id'],\
                      'caption': sent,
                      'eos_prob': eos_prob[k].tolist(),
+                     'lenpred_prob': lenpred_prob[k].tolist(),
                      'perplexity': perplexity[k].item(),
                      'entropy': entropy[k].item()}
+            if os.getenv('LENGTH_PREDICT') and os.getenv('DESIRED_LENGTH'):
+                entry.update({'desired_caption': desired_sents[k]})
             if eval_kwargs.get('dump_path', 0) == 1:
                 entry['file_name'] = data['infos'][k]['file_path']
             predictions.append(entry)
@@ -242,4 +327,9 @@ def eval_split(model, crit, loader, eval_kwargs={}):
 
     # Switch back to training mode
     model.train()
+
+    if os.getenv('LENGTH_PREDICT'):
+        print('Length prediction acc:', lenpred_acc/loss_evals)
+        print('Length prediction accs:', [_/loss_evals for _ in lenpred_accs])
+        print('Length prediction l2:', lenpred_l2/loss_evals)
     return loss_sum/loss_evals, predictions, lang_stats
