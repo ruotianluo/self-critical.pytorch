@@ -160,7 +160,7 @@ def train(opt):
         elif not sc_flag:
             loss = crit(dp_model(fc_feats, att_feats, labels, att_masks), labels[:,1:], masks[:,1:])
         else:
-            gen_result, sample_logprobs = dp_model(fc_feats, att_feats, att_masks, opt={'sample_max':0, 'len_pred':os.getenv('LENGTH_PREDICT', 0)}, mode='sample')
+            gen_result, sample_logprobs = dp_model(fc_feats, att_feats, att_masks, opt={'sample_max':0, 'len_pred':int(os.getenv('LENGTH_PREDICT') is not None)}, mode='sample')
             reward = get_self_critical_reward(dp_model, fc_feats, att_feats, att_masks, data, gen_result, opt)
             loss = rl_crit(sample_logprobs, gen_result.data, torch.from_numpy(reward).float().cuda())
             if os.getenv('LENGTH_PREDICT'):

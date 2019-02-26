@@ -202,7 +202,7 @@ def eval_split(model, crit, loader, eval_kwargs={}):
         fc_feats, att_feats, att_masks = tmp
         # forward the model to also get generated samples for each image
         with torch.no_grad():
-            if os.getenv('LENGTH_PREDICT') and os.getenv('DESIRED_LENGTH'):
+            if os.getenv('DESIRED_LENGTH'):
                 # import pdb;pdb.set_trace()
                 desired_sents = [{} for _ in range(len(fc_feats))]
                 for desired_length in os.getenv('DESIRED_LENGTH').split(','):
@@ -220,12 +220,14 @@ def eval_split(model, crit, loader, eval_kwargs={}):
             # temporary
             
             if eval_kwargs['beam_size'] == 1 and os.getenv('LENGTH_PREDICT'):
-                eval_kwargs.update({'len_pred':1})
                 seq, seq_logprobs = model(fc_feats, att_feats, att_masks, opt={'sample_max':1, 'len_pred':1}, mode='sample')
                 _acc, _accs, _reg, lenpred_prob = length_loss(model.states, seq)
                 model.states = []
             else:
+                if os.getenv('LENGTH_PREDICT'):
+                    eval_kwargs.update({'len_pred':1})
                 seq, seq_logprobs = model(fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')
+                model.states = []
                 lenpred_prob = torch.zeros(seq.shape)
 
             seq = seq.data
@@ -247,7 +249,7 @@ def eval_split(model, crit, loader, eval_kwargs={}):
                      'lenpred_prob': lenpred_prob[k].tolist(),
                      'perplexity': perplexity[k].item(),
                      'entropy': entropy[k].item()}
-            if os.getenv('LENGTH_PREDICT') and os.getenv('DESIRED_LENGTH'):
+            if os.getenv('DESIRED_LENGTH'):
                 entry.update({'desired_caption': desired_sents[k]})
             if eval_kwargs.get('dump_path', 0) == 1:
                 entry['file_name'] = data['infos'][k]['file_path']
