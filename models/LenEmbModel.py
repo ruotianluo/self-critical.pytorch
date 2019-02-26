@@ -116,6 +116,8 @@ class LenEmbModel(AttModel):
         
         # Change start
         state = list(state) + [F.relu(len_input.float()-1).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+        if int(os.getenv('CONSTRAINED', 0)):
+            logprobs.eos_change = (len_input - 1 >= 0) + (len_input - 1 == 0)
         # Change end
 
         return logprobs, state
@@ -184,6 +186,10 @@ class LenEmbModel(AttModel):
                 it = fc_feats.new_zeros(batch_size*sample_n, dtype=torch.long)
 
             logprobs, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, output_logsoftmax=output_logsoftmax, len_pred=len_pred)
+            
+            if hasattr(logprobs, 'eos_change'):
+                logprobs[logprobs.eos_change == 1, 0] = float('-inf')
+                logprobs[logprobs.eos_change == 2, 0] = logprobs[logprobs.eos_change == 2, 0] + 10000
             
             if decoding_constraint and t > 0:
                 tmp = logprobs.new_zeros(logprobs.size())

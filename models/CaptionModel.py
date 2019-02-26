@@ -58,7 +58,12 @@ class CaptionModel(nn.Module):
             #beam_seq_logprobs : log-probability of each decision made, same size as beam_seq
             #beam_logprobs_sum : joint log-probability of each beam
 
-            ys,ix = torch.sort(logprobsf,1,True)
+            _logprobsf = logprobsf.clone()
+            if hasattr(logprobsf, 'eos_change'):
+                _logprobsf[logprobsf.eos_change == 1, 0] = float('-inf')
+                _logprobsf[logprobsf.eos_change == 2, 0] = _logprobsf[logprobsf.eos_change == 2, 0] + 10000
+            ys,ix = torch.sort(_logprobsf,1,True)
+            ys = logprobsf.gather(1, ix)
             candidates = []
             cols = min(beam_size, ys.size(1))
             rows = beam_size
@@ -115,6 +120,8 @@ class CaptionModel(nn.Module):
         done_beams_table = [[] for _ in range(group_size)]
         state_table = [list(torch.unbind(_)) for _ in torch.stack(init_state).chunk(group_size, 2)]
         logprobs_table = list(init_logprobs.chunk(group_size, 0))
+        if hasattr(init_logprobs, 'eos_change'):
+            for a,b in zip(logprobs_table, list(init_logprobs.eos_change.chunk(group_size, 0))): a.eos_change = b
         # END INIT
 
         # Chunk elements in the args
@@ -126,7 +133,7 @@ class CaptionModel(nn.Module):
             for divm in range(group_size): 
                 if t >= divm and t <= self.seq_length + divm - 1:
                     # add diversity
-                    logprobsf = logprobs_table[divm].data.float()
+                    logprobsf = logprobs_table[divm]
                     # suppress previous word
                     if decoding_constraint and t-divm > 0:
                         logprobsf.scatter_(1, beam_seq_table[divm][t-divm-1].unsqueeze(1).cuda(), float('-inf'))

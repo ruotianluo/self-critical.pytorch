@@ -223,6 +223,12 @@ class AttModel(CaptionModel):
 
             state[0][0].copy_(new_state)
 
+        if int(os.getenv('CONSTRAINED', 0)):
+            if self.desired_length > 0:
+                logprobs.eos_change = torch.ones(logprobs.shape[0]).long().to(logprobs.device) # 0, don't change, 1 to -inf, 2 to inf
+            else:
+                logprobs.eos_change = torch.ones(logprobs.shape[0]).long().to(logprobs.device) * 2
+
         return logprobs, state
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
@@ -290,6 +296,10 @@ class AttModel(CaptionModel):
 
             logprobs, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, output_logsoftmax=output_logsoftmax, len_pred=len_pred)
             
+            if hasattr(logprobs, 'eos_change'):
+                logprobs[logprobs.eos_change == 1, 0] = float('-inf')
+                logprobs[logprobs.eos_change == 2, 0] = logprobs[logprobs.eos_change == 2, 0] + 10000
+
             if decoding_constraint and t > 0:
                 tmp = logprobs.new_zeros(logprobs.size())
                 tmp.scatter_(1, seq[:,t-1].data.unsqueeze(1), float('-inf'))
