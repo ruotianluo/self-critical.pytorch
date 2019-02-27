@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import *
 import misc.utils as utils
+import os
 
 
 class CaptionModel(nn.Module):
@@ -177,7 +178,26 @@ class CaptionModel(nn.Module):
 
                     # move the current group one step forward in time
                     
-                    it = beam_seq_table[divm][t-divm]
+                    it = beam_seq_table[divm][t-divm].clone()
+                    if t-divm == 0:
+                        if getattr(self, 'decide_length', 'none') != 'none':
+                            beam_seq_table[divm][t-divm] += 20000
+                            state = list(state_table[divm])
+                            if hasattr(self, 'desired_length'):
+                                # Add current length to state
+                                state = list(state[:2]) + [state[0].new_tensor([self.desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+                            else:
+                                state = list(state[:2]) + [it.float().to(state[0].device).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+                            if self.decide_length == 'marker':
+                                if hasattr(self, 'desired_length') and type(self.desired_length) is int:
+                                    it.fill_(self.desired_length)
+                                it.add_(20000)
+                            elif self.decide_length == 'init':
+                                if os.getenv('LEN_INIT_SANITY') is not None:
+                                    it.fill_(0)
+                                state = [self.memory.reshape(1,1,-1).expand_as(state[0]) * it.float().to(state[0].device).unsqueeze(1)] + list(state)[1:]
+                                it.fill_(0)
+                            state_table[divm] = state
                     logprobs_table[divm], state_table[divm] = self.get_logprobs_state(it.cuda(), *(args[divm] + [state_table[divm]]))
 
         # all beams are sorted by their log-probabilities

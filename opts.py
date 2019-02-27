@@ -24,6 +24,8 @@ def parse_opt():
                     help='Cached token file for calculating cider score during self critical training.')
 
     # Model settings
+    parser.add_argument('--decide_length', type=str, default='none',
+                    help='none, simple, marker, init, lenemb')
     parser.add_argument('--caption_model', type=str, default="show_tell",
                     help='show_tell, show_attend_tell, all_img, fc, att2in, att2in2, att2all2, adaatt, adaattmo, topdown, stackatt, denseatt, transformer')
     parser.add_argument('--rnn_size', type=int, default=512,

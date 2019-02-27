@@ -172,6 +172,10 @@ class DataLoader(data.Dataset):
             data['att_masks'] = None
 
         data['labels'] = np.vstack(label_batch)
+        if getattr(self.opt, 'decide_length', 'none') != 'none':
+            data['labels'] = np.hstack([data['labels'][:, 0:1], (data['labels'] != 0).sum(1, keepdims=True) + 1, data['labels'][:, 1:]])
+            mask_batch = np.hstack([mask_batch, mask_batch[:,:1]])
+
         # generate mask
         nonzeros = np.array(list(map(lambda x: (x != 0).sum()+2, data['labels'])))
         for ix, row in enumerate(mask_batch):

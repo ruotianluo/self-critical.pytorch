@@ -231,8 +231,10 @@ def eval_split(model, crit, loader, eval_kwargs={}):
 
             seq = seq.data
             eos_prob = F.softmax(seq_logprobs, dim=2)[:,:,0]
-            entropy = - (F.softmax(seq_logprobs, dim=2) * seq_logprobs).sum(2).sum(1) / ((seq>0).float().sum(1)+1)
-            perplexity = - seq_logprobs.gather(2, seq.unsqueeze(2)).squeeze(2).sum(1) / ((seq>0).float().sum(1)+1)
+            tmp_seq_logprobs = seq_logprobs.clone(); tmp_seq_logprobs[torch.isinf(tmp_seq_logprobs)] = -1e10
+            entropy = - (F.softmax(seq_logprobs, dim=2) * tmp_seq_logprobs).sum(2).sum(1) / ((seq>0).float().sum(1)+1)
+            
+            perplexity = - seq_logprobs.gather(2, (seq % 20000).unsqueeze(2)).squeeze(2).sum(1) / ((seq>0).float().sum(1)+1)
         
         # Print beam search
         if beam_size > 1 and verbose_beam:

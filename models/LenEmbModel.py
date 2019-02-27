@@ -32,7 +32,11 @@ class LenEmbModel(AttModel):
         # pp_att_feats is used for attention, we cache it in advance to reduce computation cost
 
         for i in range(seq.size(1) - 1):
-            if self.training and i >= 1 and self.ss_prob > 0.0: # otherwiste no need to sample
+            if self.decide_length != 'none':
+                start_index = 2
+            else:
+                start_index = 1 # Start schedule sampling or start consider early stop after this index
+            if self.training and i >= start_index and self.ss_prob > 0.0: # otherwiste no need to sample
                 sample_prob = fc_feats.new(batch_size).uniform_(0, 1)
                 sample_mask = sample_prob < self.ss_prob
                 if sample_mask.sum() == 0:
@@ -51,6 +55,28 @@ class LenEmbModel(AttModel):
             if i >= 1 and seq[:, i].sum() == 0:
                 break
 
+            if i == 0:
+                if self.decide_length == 'marker':
+                    #change start
+                    # xt = self.embed(seq[:, i])
+                    xt = self.bos_token.reshape(1,-1).expand(batch_size, -1)
+                    #change end
+                    output, state = self.core(xt, p_fc_feats, p_att_feats, pp_att_feats, state, p_att_masks)
+                    outputs[:, i] = F.log_softmax(self.len_logit(output))
+                elif 'init' in self.decide_length:
+                    outputs[:, i] = F.log_softmax(self.len_logit(p_fc_feats)) # this only works only when fc_embed is itendity
+                if self.decide_length != 'none':
+                    continue
+            elif i == 1:
+                if 'marker' in self.decide_length:
+                    it.add_(20000)
+                elif self.decide_length == 'init':
+                    if os.getenv('LEN_INIT_SANITY') is not None:
+                        it.fill_(0)
+                    state = [self.memory.reshape(1,1,-1).expand_as(state[0]) * it.unsqueeze(1).float()] + list(state)[1:]
+                    it.fill_(0)
+                        
+
             output, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
             outputs[:, i] = output
 
@@ -58,10 +84,16 @@ class LenEmbModel(AttModel):
 
     def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state, output_logsoftmax=1, len_pred=False):
         # 'it' contains a word index
-        xt = self.embed(it)
+        if it.dtype is torch.long:
+            if (it >= 20000).all():
+                xt = self.len_embed(it-20000)
+            else:
+                xt = self.embed(it)
+        else:
+            # Used in marker mode, we directly feed embedded vector in
+            xt = it
 
-        # Change start
-        if len(state) > 2:
+        if len(state) > 2: # only when decide_length != 'none' or it's lenemb model or hasattr self.desired_length
             len_input = state[-1][-1][:, 0].long()
         else:
             len_input = torch.tensor([getattr(self, 'desired_length', int(os.getenv('DEFAULT_LENGTH', 9)))]).long().expand(fc_feats.shape[0]).to(fc_feats.device)
@@ -145,7 +177,15 @@ class LenEmbModel(AttModel):
                 if t == 0: # input <bos>
                     it = fc_feats.new_zeros([beam_size], dtype=torch.long)
 
-                logprobs, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state)
+                if t == 0 and self.decide_length != 'none':
+                    if self.decide_length == 'marker':
+                        xt = self.embed(seq[:, t]) # all zero
+                        output, state = self.core(xt, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, state, tmp_att_masks)
+                        logprobs = F.log_softmax(self.len_logit(output))
+                    elif 'init' in self.decide_length:
+                        logprobs = F.log_softmax(self.len_logit(p_fc_feats))
+                else:
+                    logprobs, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state)
 
             self.done_beams[k] = self.beam_search(state, logprobs, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, opt=opt)
             seq[:, k] = self.done_beams[k][0]['seq'] # the first beam has highest cumulative score
@@ -185,8 +225,39 @@ class LenEmbModel(AttModel):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size*sample_n, dtype=torch.long)
 
-            logprobs, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, output_logsoftmax=output_logsoftmax, len_pred=len_pred)
-            
+            if self.decide_length != 'none':
+                start_offset = 1
+            else:
+                start_offset = 0
+
+            if t == 1 and self.decide_length != 'none':
+                if hasattr(self, 'desired_length'):
+                    # Add current length to state
+                    state = list(state[:2]) + [state[0].new_tensor([self.desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+                else:
+                    state = list(state[:2]) + [it.float().to(state[0].device).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+                if 'marker' in self.decide_length:
+                    if hasattr(self, 'desired_length'):
+                        it.fill_(self.desired_length)
+                    it.add_(20000)
+                elif self.decide_length == 'init':
+                    if os.getenv('LEN_INIT_SANITY') is not None:
+                        it.fill_(0)
+                    state = [self.memory.reshape(1,1,-1).expand_as(state[0]) * it.unsqueeze(1).float()] + list(state)[1:]
+                    it.fill_(0)
+
+            if t == 0 and self.decide_length != 'none':
+                if self.decide_length == 'marker':
+                    xt = self.embed(seq[:, t]) # all zero
+                    output, state = self.core(xt, p_fc_feats, p_att_feats, pp_att_feats, state, p_att_masks)
+                    logprobs = self.len_logit(output)
+                elif 'init' in self.decide_length:
+                    logprobs = self.len_logit(p_fc_feats)
+                if output_logsoftmax:
+                    logprobs = F.log_softmax(logprobs, 1)
+            else:
+                logprobs, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, output_logsoftmax=output_logsoftmax, len_pred=len_pred)
+
             if hasattr(logprobs, 'eos_change'):
                 logprobs[logprobs.eos_change == 1, 0] = float('-inf')
                 logprobs[logprobs.eos_change == 2, 0] = logprobs[logprobs.eos_change == 2, 0] + 10000
@@ -241,6 +312,11 @@ class LenEmbModel(AttModel):
             it = it * unfinished.type_as(it)
             seq[:,t] = it
             seqLogprobs[:,t] = logprobs
+            if output_logsoftmax:
+                seqLogprobs[:,t] = F.log_softmax(logprobs, dim=1)
+            # Change the length marker so that the decoder and self critical can omit it.
+            if t == 0 and self.decide_length != 'none':
+                seq[:, 0] += 20000
             # quit loop if all sequences have finished
             if unfinished.sum() == 0:
                 break

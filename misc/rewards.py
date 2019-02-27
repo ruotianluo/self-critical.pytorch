@@ -26,6 +26,8 @@ def init_scorer(cached_tokens):
 def array_to_str(arr):
     out = ''
     for i in range(len(arr)):
+        if arr[i] >= 20000:
+            continue
         out += str(arr[i]) + ' '
         if arr[i] == 0:
             break

@@ -60,7 +60,9 @@ def decode_sequence(ix_to_word, seq):
         txt = ''
         for j in range(D):
             ix = seq[i,j]
-            if ix > 0 :
+            if ix > 0:
+                if ix >= 20000:
+                    continue
                 if j >= 1:
                     txt = txt + ' '
                 txt = txt + ix_to_word[str(ix.item())]
@@ -134,7 +136,7 @@ class StructureLosses(nn.Module):
         # margin should be alright; Let's try.
 
         # Gather input: BxTxD -> BxT
-        input = input.gather(2, seq.unsqueeze(2)).squeeze(2)
+        input = input.gather(2, (seq % 20000).unsqueeze(2)).squeeze(2)
 
         if self.loss_type == 'seqnll':
             # input is logsoftmax
