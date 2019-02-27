@@ -188,8 +188,8 @@ class CaptionModel(nn.Module):
                                 state = list(state[:2]) + [state[0].new_tensor([self.desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
                             else:
                                 state = list(state[:2]) + [it.float().to(state[0].device).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
-                            if self.decide_length == 'marker':
-                                if hasattr(self, 'desired_length') and type(self.desired_length) is int:
+                            if 'marker' in self.decide_length:
+                                if hasattr(self, 'desired_length'):
                                     it.fill_(self.desired_length)
                                 it.add_(20000)
                             elif self.decide_length == 'init':

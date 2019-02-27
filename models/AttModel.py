@@ -107,6 +107,11 @@ class AttModel(CaptionModel):
                 self.len_embed = nn.Sequential(nn.Embedding(21, self.input_encoding_size),
                                 nn.ReLU(),
                                 nn.Dropout(self.drop_prob_lm))
+            elif self.decide_length == 'init_marker':
+                self.len_logit = nn.Sequential(self.fc_embed, self.len_logit)
+                self.len_embed = nn.Sequential(nn.Embedding(21, self.input_encoding_size),
+                                nn.ReLU(),
+                                nn.Dropout(self.drop_prob_lm))
             elif self.decide_length == 'init':
                 self.len_logit = nn.Sequential(self.fc_embed, self.len_logit)
                 self.memory = nn.Parameter(torch.randn(self.rnn_size)*0.01)
@@ -197,7 +202,7 @@ class AttModel(CaptionModel):
                     xt = self.embed(seq[:, i])
                     output, state = self.core(xt, p_fc_feats, p_att_feats, pp_att_feats, state, p_att_masks)
                     outputs[:, i] = F.log_softmax(self.len_logit(output))
-                elif self.decide_length == 'init':
+                elif 'init' in self.decide_length:
                     outputs[:, i] = F.log_softmax(self.len_logit(p_fc_feats)) # this only works only when fc_embed is itendity
                 if self.decide_length != 'none':
                     continue
@@ -205,7 +210,7 @@ class AttModel(CaptionModel):
                 if self.decide_length != 'none':
                     # two cases, decide length model
                     state = list(state[:2]) + [it.float().to(state[0].device).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
-                if self.decide_length == 'marker':
+                if 'marker' in self.decide_length:
                     it.add_(20000)
                 elif self.decide_length == 'init':
                     if os.getenv('LEN_INIT_SANITY') is not None:
@@ -316,7 +321,7 @@ class AttModel(CaptionModel):
                         xt = self.embed(seq[0]) # all zero
                         output, state = self.core(xt, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, state, tmp_att_masks)
                         logprobs = F.log_softmax(self.len_logit(output))
-                    elif self.decide_length == 'init':
+                    elif 'init' in self.decide_length:
                         logprobs = F.log_softmax(self.len_logit(p_fc_feats), dim=1)
                 else:
                     logprobs, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state)
@@ -373,7 +378,7 @@ class AttModel(CaptionModel):
                     state = list(state[:2]) + [state[0].new_tensor([self.desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
                 else:
                     state = list(state[:2]) + [it.float().to(state[0].device).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
-                if self.decide_length == 'marker':
+                if 'marker' in self.decide_length:
                     if hasattr(self, 'desired_length'):
                         it.fill_(self.desired_length)
                     it.add_(20000)
@@ -388,7 +393,7 @@ class AttModel(CaptionModel):
                     xt = self.embed(seq[:, t].clone()) # all zero
                     output, state = self.core(xt, p_fc_feats, p_att_feats, pp_att_feats, state, p_att_masks)
                     logprobs = self.len_logit(output)
-                elif self.decide_length == 'init':
+                elif 'init' in self.decide_length:
                     logprobs = self.len_logit(p_fc_feats)
                 if output_logsoftmax:
                     logprobs = F.log_softmax(logprobs, 1)
