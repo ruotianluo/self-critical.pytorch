@@ -179,6 +179,9 @@ class AttModel(CaptionModel):
         # 'it' contains a word index
         xt = self.embed(it)
 
+        if len(state) > 2: # only when decide_length is not 'none' or it's lenemb model or hasattr self.desired_length
+            len_input = state[-1][-1][:, 0].long()
+            state = state[:2]
         output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
         if os.getenv('LENGTH_PREDICT') and len_pred:
             self.states.append(self.len_fc(output.detach()))
@@ -193,8 +196,7 @@ class AttModel(CaptionModel):
             # print(self.vocab[str(logprobs.max(-1)[1].item())])
             # import pdb;pdb.set_trace()
             def obj_func(input):
-                len_obj = F.log_softmax(self.len_fc(input))[:, self.desired_length]
-                # len_obj = F.log_softmax(self.len_fc(input)).gather(1, self.desired_length.unsqueeze(1)).squeeze(1) # higher
+                len_obj = F.log_softmax(self.len_fc(input)).gather(1, len_input.unsqueeze(1)).squeeze(1) # higher
                 dist_obj = F.kl_div(F.log_softmax(self.logit(input), dim=1), logprobs.exp(), reduction='none')
                 # _grad_l = torch.autograd.grad(len_obj.sum(), input, retain_graph=True)[0]
                 # _grad_d = torch.autograd.grad(dist_obj.sum(), input, retain_graph=True)[0]
@@ -216,19 +218,12 @@ class AttModel(CaptionModel):
             logprobs = F.log_softmax(self.logit(new_state), dim=1)
             # print(self.vocab[str(logprobs.max(-1)[1].item())])
 
-            if self.desired_length > 0:
-                # print(self.len_fc(output).max(1)[1] - self.desired_length)
-                # print(self.len_fc(new_state).max(1)[1] - self.desired_length)
-                self.desired_length -= 1
-
             state[0][0].copy_(new_state)
 
+        state = list(state)[:2] + [F.relu(len_input.float()-1).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
         if int(os.getenv('CONSTRAINED', 0)):
-            if self.desired_length > 0:
-                logprobs.eos_change = torch.ones(logprobs.shape[0]).long().to(logprobs.device) # 0, don't change, 1 to -inf, 2 to inf
-            else:
-                logprobs.eos_change = torch.ones(logprobs.shape[0]).long().to(logprobs.device) * 2
-
+            logprobs.eos_change = (len_input - 1 >= 0) + (len_input - 1 == 0)
+        
         return logprobs, state
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
@@ -249,6 +244,9 @@ class AttModel(CaptionModel):
             tmp_att_feats = p_att_feats[k:k+1].expand(*((beam_size,)+p_att_feats.size()[1:])).contiguous()
             tmp_p_att_feats = pp_att_feats[k:k+1].expand(*((beam_size,)+pp_att_feats.size()[1:])).contiguous()
             tmp_att_masks = p_att_masks[k:k+1].expand(*((beam_size,)+p_att_masks.size()[1:])).contiguous() if att_masks is not None else None
+
+            if hasattr(self, 'desired_length') and getattr(self, 'decide_length', 'none') == 'none':
+                state = list(state)[:2] + [state[0].new_tensor([self.desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
 
             for t in range(1):
                 if t == 0: # input <bos>
@@ -277,6 +275,9 @@ class AttModel(CaptionModel):
 
         batch_size = fc_feats.size(0)
         state = self.init_hidden(batch_size*sample_n)
+
+        if hasattr(self, 'desired_length') and getattr(self, 'decide_length', 'none') == 'none':
+            state = list(state)[:2] + [state[0].new_tensor([self.desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
 
         p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
 
