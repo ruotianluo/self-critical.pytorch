@@ -209,7 +209,7 @@ def eval_split(model, crit, loader, eval_kwargs={}):
                     model.vocab = loader.get_vocab()
                     model.vocab['0'] = '<eos>'
                     model.desired_length = int(desired_length)
-                    seq, __ = model(fc_feats, att_feats, att_masks, opt={'sample_max':1, 'len_pred':1}, mode='sample')
+                    seq, __ = model(fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')
                     _sents = utils.decode_sequence(loader.get_vocab(), seq, remove_bad_endings)
                     for _s in _sents:
                         print(_s)
@@ -220,12 +220,11 @@ def eval_split(model, crit, loader, eval_kwargs={}):
             # temporary
             
             if eval_kwargs['beam_size'] == 1 and os.getenv('LENGTH_PREDICT'):
-                seq, seq_logprobs = model(fc_feats, att_feats, att_masks, opt={'sample_max':1, 'len_pred':1}, mode='sample')
+                eval_kwargs.update({'len_pred':1})
+                seq, seq_logprobs = model(fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')
                 _acc, _accs, _reg, lenpred_prob = length_loss(model.states, seq)
                 model.states = []
             else:
-                if os.getenv('LENGTH_PREDICT'):
-                    eval_kwargs.update({'len_pred':1})
                 seq, seq_logprobs = model(fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')
                 model.states = []
                 lenpred_prob = torch.zeros(seq.shape)

@@ -192,7 +192,7 @@ class AttModel(CaptionModel):
         else:
             logprobs = self.logit(output)
 
-        if hasattr(self, 'desired_length') and os.getenv('LENGTH_PREDICT') and len_pred:
+        if hasattr(self, 'desired_length') and os.getenv('LENGTH_PREDICT'):
             # print(self.vocab[str(logprobs.max(-1)[1].item())])
             # import pdb;pdb.set_trace()
             def obj_func(input):
