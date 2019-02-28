@@ -1,10 +1,10 @@
 from AttModel import *
 
 
-class LenEmbModel(AttModel):
+class _LenEmbModel(AttModel):
     def __init__(self, opt):
         super(LenEmbModel, self).__init__(opt)
-        self.len_embed = nn.Sequential(nn.Embedding(21, self.input_encoding_size),
+        self.rem_len_embed = nn.Sequential(nn.Embedding(21, self.input_encoding_size),
                                 nn.ReLU(),
                                 nn.Dropout(self.drop_prob_lm))
 
@@ -17,12 +17,14 @@ class LenEmbModel(AttModel):
         state = self.init_hidden(batch_size)
 
         # Change start
-        mask = (seq>0).float()
-        mask = torch.cat([mask.new(mask.size(0), 1).fill_(1), mask[:, :-1]], 1)
-        len_input = (mask.sum(1,keepdim=True) - mask.cumsum(1)).long()
-        len_input = mask.sum(1).long()
+        if self.decide_length == 'none':
+            mask = (seq>0).float()
+            mask = torch.cat([mask.new(mask.size(0), 1).fill_(1), mask[:, :-1]], 1)
+            len_input = (mask.sum(1,keepdim=True) - mask.cumsum(1)).long()
+            len_input = mask.sum(1).long()
+            assert (len_input == (seq>0 + 1).sum(1)).all()
 
-        state = list(state) + [len_input.unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+            state = list(state) + [len_input.unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
         # Change end
 
         outputs = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size+1)
@@ -52,7 +54,7 @@ class LenEmbModel(AttModel):
             else:
                 it = seq[:, i].clone()          
             # break if all the sequences end
-            if i >= 1 and seq[:, i].sum() == 0:
+            if i >= start_index and seq[:, i].sum() == 0:
                 break
 
             if i == 0:
@@ -95,9 +97,21 @@ class LenEmbModel(AttModel):
 
         if len(state) > 2: # only when decide_length != 'none' or it's lenemb model or hasattr self.desired_length
             len_input = state[-1][-1][:, 0].long()
+            state = state[:2]
         else:
-            len_input = torch.tensor([getattr(self, 'desired_length', int(os.getenv('DEFAULT_LENGTH', 9)))]).long().expand(fc_feats.shape[0]).to(fc_feats.device)
-        xt = torch.cat([xt, self.len_embed(len_input)], 1)
+            if self.decide_length == 'none':
+                # When decide_length is none and len_input is not given len_input is set to 9 or desired_length or DEFUALT_LENGTH
+                len_input = torch.tensor([getattr(self, 'desired_length', int(os.getenv('DEFAULT_LENGTH', 9)))]).long().expand(fc_feats.shape[0]).to(fc_feats.device)
+            # elif hasattr(self, 'desired_length'):
+            #     len_input = self.desired_length
+
+
+        # Change start
+        # if len(state) > 2:
+        #     len_input = state[-1][-1][:, 0].long()
+        # else:
+        #     len_input = torch.tensor([getattr(self, 'desired_length', int(os.getenv('DEFAULT_LENGTH', 9)))]).long().expand(fc_feats.shape[0]).to(fc_feats.device)
+        xt = torch.cat([xt, self.rem_len_embed(len_input)], 1)
         state = state[:2]
         # Change end
 
@@ -111,12 +125,11 @@ class LenEmbModel(AttModel):
         else:
             logprobs = self.logit(output)
 
-        if hasattr(self, 'desired_length') and os.getenv('LENGTH_PREDICT') and len_pred:
+        if hasattr(self, 'desired_length') and os.getenv('LENGTH_PREDICT'):
             # print(self.vocab[str(logprobs.max(-1)[1].item())])
             # import pdb;pdb.set_trace()
             def obj_func(input):
-                len_obj = F.log_softmax(self.len_fc(input))[:, self.desired_length]
-                # len_obj = F.log_softmax(self.len_fc(input)).gather(1, self.desired_length.unsqueeze(1)).squeeze(1) # higher
+                len_obj = F.log_softmax(self.len_fc(input)).gather(1, len_input.unsqueeze(1)).squeeze(1) # higher
                 dist_obj = F.kl_div(F.log_softmax(self.logit(input), dim=1), logprobs.exp(), reduction='none')
                 # _grad_l = torch.autograd.grad(len_obj.sum(), input, retain_graph=True)[0]
                 # _grad_d = torch.autograd.grad(dist_obj.sum(), input, retain_graph=True)[0]
@@ -138,20 +151,13 @@ class LenEmbModel(AttModel):
             logprobs = F.log_softmax(self.logit(new_state), dim=1)
             # print(self.vocab[str(logprobs.max(-1)[1].item())])
 
-            if self.desired_length > 0:
-                # print(self.len_fc(output).max(1)[1] - self.desired_length)
-                # print(self.len_fc(new_state).max(1)[1] - self.desired_length)
-                self.desired_length -= 1
-
             state[0][0].copy_(new_state)
 
-        
-        # Change start
-        state = list(state) + [F.relu(len_input.float()-1).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+        if 'len_input' in locals():
+            state = list(state)[:2] + [F.relu(len_input.float()-1).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
         if int(os.getenv('CONSTRAINED', 0)):
             logprobs.eos_change = (len_input - 1 >= 0) + (len_input - 1 == 0)
-        # Change end
-
+        
         return logprobs, state
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
@@ -172,6 +178,9 @@ class LenEmbModel(AttModel):
             tmp_att_feats = p_att_feats[k:k+1].expand(*((beam_size,)+p_att_feats.size()[1:])).contiguous()
             tmp_p_att_feats = pp_att_feats[k:k+1].expand(*((beam_size,)+pp_att_feats.size()[1:])).contiguous()
             tmp_att_masks = p_att_masks[k:k+1].expand(*((beam_size,)+p_att_masks.size()[1:])).contiguous() if att_masks is not None else None
+
+            if hasattr(self, 'desired_length') and getattr(self, 'decide_length', 'none') == 'none':
+                state = list(state)[:2] + [state[0].new_tensor([self.desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
 
             for t in range(1):
                 if t == 0: # input <bos>
@@ -208,6 +217,9 @@ class LenEmbModel(AttModel):
 
         batch_size = fc_feats.size(0)
         state = self.init_hidden(batch_size*sample_n)
+
+        if hasattr(self, 'desired_length') and getattr(self, 'decide_length', 'none') == 'none':
+            state = list(state)[:2] + [state[0].new_tensor([self.desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
 
         p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
 
@@ -261,14 +273,14 @@ class LenEmbModel(AttModel):
             if hasattr(logprobs, 'eos_change'):
                 logprobs[logprobs.eos_change == 1, 0] = float('-inf')
                 logprobs[logprobs.eos_change == 2, 0] = logprobs[logprobs.eos_change == 2, 0] + 10000
-            
-            if decoding_constraint and t > 0:
+
+            if decoding_constraint and t > 0+start_offset:
                 tmp = logprobs.new_zeros(logprobs.size())
                 tmp.scatter_(1, seq[:,t-1].data.unsqueeze(1), float('-inf'))
                 logprobs = logprobs + tmp
 
             # Mess with trigrams
-            if block_trigrams and t >= 3:
+            if block_trigrams and t >= 3+start_offset:
                 # Store trigram generated at last step
                 prev_two_batch = seq[:,t-3:t-1]
                 for i in range(batch_size): # = seq.size(0)
@@ -297,15 +309,28 @@ class LenEmbModel(AttModel):
             # sample the next word
             if t == self.seq_length: # skip if we achieve maximum length
                 break
-            if sample_max == 1:
+            if sample_max:
                 sampleLogprobs, it = torch.max(logprobs.data, 1)
                 it = it.view(-1).long()
+            elif sample_max == 2: # gumbel softmax
+                # ref: https://gist.github.com/yzh119/fd2146d2aeb329d067568a493b20172f
+                def sample_gumbel(shape, eps=1e-20):
+                    U = torch.rand(shape).cuda()
+                    return -torch.log(-torch.log(U + eps) + eps)
+                def gumbel_softmax_sample(logits, temperature):
+                    y = logits + sample_gumbel(logits.size())
+                    return F.softmax(y / temperature, dim=-1)
+                _logprobs = gumbel_softmax_sample(logprobs, temperature)
+                _, it = torch.max(_logprobs.data, 1)
+                sampleLogprobs = logprobs.gather(1, it.unsqueeze(1)) # gather the logprobs at sampled positions
             else:
                 it = torch.distributions.Categorical(logits=logprobs.detach() / temperature).sample()
                 sampleLogprobs = logprobs.gather(1, it.unsqueeze(1)) # gather the logprobs at sampled positions
 
             # stop when all finished
-            if t == 0:
+            if t < 0 + start_offset:
+                unfinished = torch.ones_like(it).long()
+            elif t == 0+start_offset:
                 unfinished = it > 0
             else:
                 unfinished = unfinished * (it > 0)

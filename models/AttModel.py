@@ -107,6 +107,8 @@ class AttModel(CaptionModel):
                 self.len_embed = nn.Sequential(nn.Embedding(21, self.input_encoding_size),
                                 nn.ReLU(),
                                 nn.Dropout(self.drop_prob_lm))
+                if self.__class__.__name__ == 'LenEmbModel':
+                    self.bos_token = nn.Parameter(torch.randn(self.input_encoding_size * 2))
             elif self.decide_length == 'init_marker':
                 self.len_logit = nn.Sequential(self.fc_embed, self.len_logit)
                 self.len_embed = nn.Sequential(nn.Embedding(21, self.input_encoding_size),
@@ -167,6 +169,15 @@ class AttModel(CaptionModel):
         batch_size = fc_feats.size(0)
         state = self.init_hidden(batch_size)
 
+        if self.decide_length == 'none': # always input len_input.
+            mask = (seq>0).float()
+            mask = torch.cat([mask.new(mask.size(0), 1).fill_(1), mask[:, :-1]], 1)
+            len_input = (mask.sum(1,keepdim=True) - mask.cumsum(1)).long()
+            len_input = mask.sum(1).long()
+            assert (len_input == (seq>0).sum(1)+1).all()
+
+            state = list(state) + [len_input.unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+
         outputs = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size+1)
 
         # Prepare the features
@@ -199,7 +210,10 @@ class AttModel(CaptionModel):
 
             if i == 0:
                 if self.decide_length == 'marker':
-                    xt = self.embed(seq[:, i])
+                    if self.__class__.__name__ == 'LenEmbModel':
+                        xt = self.bos_token.reshape(1,-1).expand(batch_size, -1)
+                    else:
+                        xt = self.embed(seq[:, i])
                     output, state = self.core(xt, p_fc_feats, p_att_feats, pp_att_feats, state, p_att_masks)
                     outputs[:, i] = F.log_softmax(self.len_logit(output))
                 elif 'init' in self.decide_length:
@@ -244,6 +258,9 @@ class AttModel(CaptionModel):
                 len_input = torch.tensor([getattr(self, 'desired_length', int(os.getenv('DEFAULT_LENGTH', 9)))]).long().expand(fc_feats.shape[0]).to(fc_feats.device)
             # elif hasattr(self, 'desired_length'):
             #     len_input = self.desired_length
+
+        if self.__class__.__name__ == 'LenEmbModel':
+            xt = torch.cat([xt, self.rem_len_embed(len_input)], 1)
 
         output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
         if os.getenv('LENGTH_PREDICT') and len_pred:
@@ -318,7 +335,10 @@ class AttModel(CaptionModel):
 
                 if t == 0 and self.decide_length != 'none':
                     if self.decide_length == 'marker':
-                        xt = self.embed(seq[0]) # all zero
+                        if self.__class__.__name__ == 'LenEmbModel':
+                            xt = self.bos_token.reshape(1,-1).expand(batch_size, -1)
+                        else:
+                            xt = self.embed(seq[0])
                         output, state = self.core(xt, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, state, tmp_att_masks)
                         logprobs = F.log_softmax(self.len_logit(output))
                     elif 'init' in self.decide_length:
@@ -390,7 +410,10 @@ class AttModel(CaptionModel):
 
             if t == 0 and self.decide_length != 'none':
                 if self.decide_length == 'marker':
-                    xt = self.embed(seq[:, t].clone()) # all zero
+                    if self.__class__.__name__ == 'LenEmbModel':
+                        xt = self.bos_token.reshape(1,-1).expand(batch_size * sample_n, -1)
+                    else:
+                        xt = self.embed(seq[:, t].clone()) # all zero
                     output, state = self.core(xt, p_fc_feats, p_att_feats, pp_att_feats, state, p_att_masks)
                     logprobs = self.len_logit(output)
                 elif 'init' in self.decide_length:
@@ -998,3 +1021,14 @@ class LMModel(AttModel):
         fc_feats = self.fc_embed(fc_feats)
 
         return fc_feats, None, None, None
+
+class LenEmbModel(Att2in2Model): 
+    def __init__(self, opt):
+        super(LenEmbModel, self).__init__(opt)
+        self.rem_len_embed = nn.Sequential(nn.Embedding(21, self.input_encoding_size),
+                                nn.ReLU(),
+                                nn.Dropout(self.drop_prob_lm))
+
+        opt.input_encoding_size = self.input_encoding_size * 2
+        self.core = Att2in2Core(opt)
+        opt.input_encoding_size = self.input_encoding_size
