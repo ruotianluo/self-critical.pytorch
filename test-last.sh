@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=$3 python eval.py --dump_images 0 --dump_json 1 --num_images -1 --model $1/model.pth --infos_path $1/infos_$2.pkl --language_eval 1 --beam_size $4 --batch_size 100 --split test

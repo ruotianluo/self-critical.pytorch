@@ -37,6 +37,8 @@ def train(opt):
     opt.use_fc, opt.use_att = utils.if_use_feat(opt.caption_model)
     if opt.use_box: opt.att_feat_size = opt.att_feat_size + 5
 
+    acc_steps = getattr(opt, 'acc_steps', 1)
+        
     loader = DataLoader(opt)
     opt.vocab_size = loader.vocab_size
     opt.seq_length = loader.seq_length
@@ -90,7 +92,7 @@ def train(opt):
     dp_lw_model.train()
 
     if opt.noamopt:
-        assert opt.caption_model == 'transformer', 'noamopt can only work with transformer'
+        assert opt.caption_model in ['transformer','aoa'], 'noamopt can only work with transformer'
         optimizer = utils.get_std_opt(model, factor=opt.noamopt_factor, warmup=opt.noamopt_warmup)
         optimizer._step = iteration
     elif opt.reduce_on_plateau:
@@ -146,29 +148,35 @@ def train(opt):
                     sc_flag = False
 
                 epoch_done = False
-                    
+            
             start = time.time()
+            if (opt.use_warmup == 1) and (iteration < opt.noamopt_warmup):
+                opt.current_lr = opt.learning_rate * (iteration+1) / opt.noamopt_warmup
+                utils.set_lr(optimizer, opt.current_lr)
             # Load data from train split (0)
             data = loader.get_batch('train')
             print('Read data:', time.time() - start)
 
+            if (iteration % acc_steps == 0):
+                optimizer.zero_grad()
+            
             torch.cuda.synchronize()
             start = time.time()
-
             tmp = [data['fc_feats'], data['att_feats'], data['labels'], data['masks'], data['att_masks']]
             tmp = [_ if _ is None else _.cuda() for _ in tmp]
             fc_feats, att_feats, labels, masks, att_masks = tmp
-            
-            optimizer.zero_grad()
+
             model_out = dp_lw_model(fc_feats, att_feats, labels, masks, att_masks, data['gts'], torch.arange(0, len(data['gts'])), sc_flag)
 
             loss = model_out['loss'].mean()
+            loss_sp = loss / acc_steps
 
-            loss.backward()
-            utils.clip_gradient(optimizer, opt.grad_clip)
-            optimizer.step()
-            train_loss = loss.item()
+            loss_sp.backward()
+            if ((iteration+1) % acc_steps == 0):
+                utils.clip_gradient(optimizer, opt.grad_clip)
+                optimizer.step()
             torch.cuda.synchronize()
+            train_loss = loss.item()
             end = time.time()
             if not sc_flag:
                 print("iter {} (epoch {}), train_loss = {:.3f}, time/batch = {:.3f}" \

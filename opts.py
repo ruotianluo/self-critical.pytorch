@@ -47,6 +47,35 @@ def parse_opt():
     parser.add_argument('--use_bn', type=int, default=0,
                     help='If 1, then do batch_normalization first in att_embed, if 2 then do bn both in the beginning and the end of att_embed')
 
+    # AoA settings
+    parser.add_argument('--mean_feats', type=int, default=1,
+                    help='use mean pooling of feats?')
+    parser.add_argument('--refine', type=int, default=1,
+                    help='refining feature vectors?')
+    parser.add_argument('--refine_aoa', type=int, default=1,
+                    help='use aoa in the refining module?')
+    parser.add_argument('--use_ff', type=int, default=1,
+                    help='keep feed-forward layer in the refining module?')
+    parser.add_argument('--dropout_aoa', type=float, default=0.3,
+                    help='dropout_aoa in the refining module?')
+
+    parser.add_argument('--ctx_drop', type=int, default=0,
+                    help='apply dropout to the context vector before fed into LSTM?')
+    parser.add_argument('--decoder_type', type=str, default='AoA',
+                    help='AoA, LSTM, base')
+    parser.add_argument('--use_multi_head', type=int, default=2,
+                    help='use multi head attention? 0 for addictive single head; 1 for addictive multi head; 2 for productive multi head.')
+    parser.add_argument('--num_heads', type=int, default=8,
+                    help='number of attention heads?')
+    parser.add_argument('--multi_head_scale', type=int, default=1,
+                    help='scale q,k,v?')
+
+    parser.add_argument('--use_warmup', type=int, default=0,
+                    help='warm up the learing rate?')
+    parser.add_argument('--acc_steps', type=int, default=1,
+                    help='accumulation steps')
+    
+
     # feature manipulation
     parser.add_argument('--norm_att_feat', type=int, default=0,
                     help='If normalize attention features')
@@ -127,7 +156,7 @@ def parse_opt():
                     help='how many images to use when periodically evaluating the validation loss? (-1 = all)')
     parser.add_argument('--save_checkpoint_every', type=int, default=2500,
                     help='how often to save a model checkpoint (in iterations)?')
-    parser.add_argument('--save_history_ckpt', type=int, default=1,
+    parser.add_argument('--save_history_ckpt', type=int, default=0,
                     help='If save checkpoints at every save point')
     parser.add_argument('--checkpoint_path', type=str, default='save',
                     help='directory to store checkpointed models')
