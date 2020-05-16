@@ -300,11 +300,11 @@ class AttModel(CaptionModel):
                 xt = torch.cat([xt, self.rem_len_embed(len_input)], 1)
             else:
                 xt = xt + self.rem_len_embed(len_input)
-            xt = F.dropout(xt, float(os.getenv('WE_DROPOUT', '0.1')), self.training)
+            xt = F.dropout(xt, 0.1, self.training)
             # TODO, should we try different dropout? 0.3?
         else:
             # Original embed dropout of att2in2
-            xt = F.dropout(xt, float(os.getenv('WE_DROPOUT', '0.5')), self.training)
+            xt = F.dropout(xt, 0.1, self.training)
 
         output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
         # if os.getenv('LENGTH_PREDICT') and len_pred:

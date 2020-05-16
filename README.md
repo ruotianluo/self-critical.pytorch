@@ -1,3 +1,15 @@
+# To run length models
+
+Since we need to include longer training examples, so we need to increase the cutoff length in `prepro_labels.py`;
+
+```
+python scripts/prepro_labels.py --input_json data/dataset_coco.json --output_json data/cocotalk.json --output_h5 data/cocotalk --max_length 30
+```
+
+training scrips are in `train_scripts` folder.
+
+
+
 # Self-critical Sequence Training for Image Captioning (+ misc.)
 
 This repository includes the unofficial implementation [Self-critical Sequence Training for Image Captioning](https://arxiv.org/abs/1612.00563) and [Bottom-Up and Top-Down Attention for Image Captioning and Visual Question Answering](https://arxiv.org/abs/1707.07998).
