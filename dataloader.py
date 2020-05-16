@@ -29,6 +29,20 @@ class DataLoader(data.Dataset):
     def get_seq_length(self):
         return self.seq_length
 
+    def state_dict(self):
+        return {'iterators': self.iterators,
+                'split_ix': self.split_ix}
+        # return {split: loader.sampler.state_dict(get_prefetch_num(split)) \
+        #             for split, loader in self.loaders.items()}
+
+    def load_state_dict(self, state_dict=None):
+        if state_dict is None:
+            return
+        self.iterators = state_dict['iterators']
+        self.split_ix = state_dict['split_ix']
+        # for split in self.loaders.keys():
+        #     self.loaders[split].sampler.load_state_dict(state_dict[split])
+
     def __init__(self, opt):
         self.opt = opt
         self.batch_size = self.opt.batch_size
@@ -185,7 +199,6 @@ class DataLoader(data.Dataset):
         data['gts'] = gts # all ground truth captions of each images
         data['bounds'] = {'it_pos_now': self.iterators[split], 'it_max': len(self.split_ix[split]), 'wrapped': wrapped}
         data['infos'] = infos
-
         return data
 
     # It's not coherent to make DataLoader a subclass of Dataset, but essentially, we only need to implement the following to functions,

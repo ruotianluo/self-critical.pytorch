@@ -138,57 +138,57 @@ def eval_split(model, crit, loader, eval_kwargs={}):
             with torch.no_grad():
                 loss = crit(model(fc_feats, att_feats, labels, att_masks), labels[:,1:], masks[:,1:]).item()
 
-                if os.getenv('LENGTH_PREDICT'):
-                    gen_result, sample_logprobs = model(fc_feats, att_feats, att_masks, opt={'sample_max':0, 'len_pred':1, 'block_trigrams': 1}, mode='sample')
+                # if os.getenv('LENGTH_PREDICT'):
+                #     gen_result, sample_logprobs = model(fc_feats, att_feats, att_masks, opt={'sample_max':0, 'len_pred':1, 'block_trigrams': 1}, mode='sample')
                         
-                    states = model.states
-                    model.states = []
+                #     states = model.states
+                #     model.states = []
 
-                    def length_loss(input, seq):
+                #     def length_loss(input, seq):
                         
-                        input = input + [input[-1]] * (model.seq_length-len(input))
-                        input = input[:model.seq_length]
-                        input = torch.stack(input, dim=1)
-                        # input = input.reshape(-1, input.shape[-1])
-                        mask = (seq>0).float()
-                        mask = torch.cat([mask.new(mask.size(0), 1).fill_(1), mask[:, :-1]], 1)
+                #         input = input + [input[-1]] * (model.seq_length-len(input))
+                #         input = input[:model.seq_length]
+                #         input = torch.stack(input, dim=1)
+                #         # input = input.reshape(-1, input.shape[-1])
+                #         mask = (seq>0).float()
+                #         mask = torch.cat([mask.new(mask.size(0), 1).fill_(1), mask[:, :-1]], 1)
 
-                        target = (mask.sum(1,keepdim=True) - mask.cumsum(1)).long()
+                #         target = (mask.sum(1,keepdim=True) - mask.cumsum(1)).long()
 
-                        if 'cls' in os.getenv('LENGTH_PREDICT'): # classificaiton
-                            # import pdb;pdb.set_trace()
-                            output = torch.nn.functional.cross_entropy(\
-                                input.reshape(-1, input.shape[-1]),
-                                target.reshape(-1),reduction='none') * mask.reshape(-1)
-                            lenpred_prob = input.softmax(2).gather(2, target.unsqueeze(2)).squeeze(2)
-                            _acc = (((input.max(-1)[1] == target).float() * mask).sum() / torch.sum(mask)).item()
-                            _accs = [0 for _ in range(20)]
-                            for t in range(min(20, input.shape[1])):
-                                _accs[t] += (((input[:,t].max(-1)[1] == target[:,t]).float() * mask[:,t]).sum() / torch.sum(mask[:,t])).item()
-                            _reg = (((input.max(-1)[1].float() - target.float()).pow(2) * mask).sum() / torch.sum(mask)).item()
-                            print('length_prediction:', _acc)
-                            print('regression:', _reg)
-                        elif 'reg' in os.getenv('LENGTH_PREDICT'): # regression
-                            output = torch.nn.functional.mse_loss(\
-                                input.reshape(-1),
-                                target.reshape(-1).float(),reduction='none') * mask.reshape(-1)
+                #         if 'cls' in os.getenv('LENGTH_PREDICT'): # classificaiton
+                #             # import pdb;pdb.set_trace()
+                #             output = torch.nn.functional.cross_entropy(\
+                #                 input.reshape(-1, input.shape[-1]),
+                #                 target.reshape(-1),reduction='none') * mask.reshape(-1)
+                #             lenpred_prob = input.softmax(2).gather(2, target.unsqueeze(2)).squeeze(2)
+                #             _acc = (((input.max(-1)[1] == target).float() * mask).sum() / torch.sum(mask)).item()
+                #             _accs = [0 for _ in range(20)]
+                #             for t in range(min(20, input.shape[1])):
+                #                 _accs[t] += (((input[:,t].max(-1)[1] == target[:,t]).float() * mask[:,t]).sum() / torch.sum(mask[:,t])).item()
+                #             _reg = (((input.max(-1)[1].float() - target.float()).pow(2) * mask).sum() / torch.sum(mask)).item()
+                #             print('length_prediction:', _acc)
+                #             print('regression:', _reg)
+                #         elif 'reg' in os.getenv('LENGTH_PREDICT'): # regression
+                #             output = torch.nn.functional.mse_loss(\
+                #                 input.reshape(-1),
+                #                 target.reshape(-1).float(),reduction='none') * mask.reshape(-1)
                             
-                            _acc = (((input.squeeze(-1).round().long() == target).float() * mask).sum() / torch.sum(mask)).item()
-                            _accs = [0 for _ in range(20)]
-                            _reg = (((input.squeeze(-1) - target.float()).pow(2) * mask).sum() / torch.sum(mask)).item()
-                            print('length_prediction:', _acc)
-                            print('regression:', _reg)
-                            lenpred_prob = 0
-                        else:
-                            raise Exception
-                        output = torch.sum(output) / torch.sum(mask)
+                #             _acc = (((input.squeeze(-1).round().long() == target).float() * mask).sum() / torch.sum(mask)).item()
+                #             _accs = [0 for _ in range(20)]
+                #             _reg = (((input.squeeze(-1) - target.float()).pow(2) * mask).sum() / torch.sum(mask)).item()
+                #             print('length_prediction:', _acc)
+                #             print('regression:', _reg)
+                #             lenpred_prob = 0
+                #         else:
+                #             raise Exception
+                #         output = torch.sum(output) / torch.sum(mask)
 
-                        return _acc, _accs, _reg, lenpred_prob
+                #         return _acc, _accs, _reg, lenpred_prob
 
-                    _acc, _accs, _reg, ___ = length_loss(states, gen_result)
-                    lenpred_acc += _acc
-                    lenpred_accs = [lenpred_accs[_] + _accs[_] for _ in range(20)]
-                    lenpred_l2 += _reg
+                #     _acc, _accs, _reg, ___ = length_loss(states, gen_result)
+                #     lenpred_acc += _acc
+                #     lenpred_accs = [lenpred_accs[_] + _accs[_] for _ in range(20)]
+                #     lenpred_l2 += _reg
             
             loss_sum = loss_sum + loss
             loss_evals = loss_evals + 1
@@ -218,7 +218,16 @@ def eval_split(model, crit, loader, eval_kwargs={}):
                     del model.desired_length
                     model.states = []
             # temporary
-            
+            if os.getenv('GOLDEN_DESIRED', 'none') != 'none':
+                if os.getenv('GOLDEN_DESIRED') == 'MEDIAN':
+                    model.desired_length = torch.tensor([np.median((gt>0).sum(1)+1) for gt in data['gts']]).long()
+                elif os.getenv('GOLDEN_DESIRED') == 'MAX':
+                    model.desired_length = torch.tensor([np.max((gt>0).sum(1)+1) for gt in data['gts']]).long()
+                elif os.getenv('GOLDEN_DESIRED') == 'MIN':
+                    model.desired_length = torch.tensor([np.min((gt>0).sum(1)+1) for gt in data['gts']]).long()
+                elif os.getenv('GOLDEN_DESIRED').isdigit():
+                    model.desired_length = torch.tensor([int(os.getenv('GOLDEN_DESIRED')) for gt in data['gts']]).long()
+
             if eval_kwargs['beam_size'] == 1 and os.getenv('LENGTH_PREDICT'):
                 eval_kwargs.update({'len_pred':1})
                 seq, seq_logprobs = model(fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')
@@ -250,6 +259,38 @@ def eval_split(model, crit, loader, eval_kwargs={}):
                      'lenpred_prob': lenpred_prob[k].tolist(),
                      'perplexity': perplexity[k].item(),
                      'entropy': entropy[k].item()}
+            if getattr(model, 'decide_length', 'none') != 'none':
+                # print('seq[:, 0] should be length +20000')
+                if hasattr(model, 'desired_length'):
+                    # this condition only satifies when golden is provided
+                    # DESIRED_LENGTH will delete model.desired_length
+                    assert os.getenv('GOLDEN_DESIRED', 'none') != 'none'
+                    try:
+                        assert (seq[:, 0] - 20000 == model.desired_length).all()
+                    except:
+                        pass
+                        # It's fine to be not equal, because seq saved what the model chose
+                        # to be the best, but not the desired length
+                        # The state or input would have been changed, but it's not 
+                        # reflected in seq.
+                    entry.update({'desired_length': model.desired_length[k].item() if torch.is_tensor(model.desired_length) else model.desired_length})
+                else:
+                    # import pudb;pu.db
+                    # print('This is when the model predict its own desired length')
+                    entry.update({'desired_length': seq[k][0].item() - 20000})
+            else:
+                # if none decide_length
+                if hasattr(model, 'desired_length'):
+                    # this condition only satifies when golden is provided
+                    # DESIRED_LENGTH will delete model.desired_length
+                    assert os.getenv('GOLDEN_DESIRED', 'none') != 'none'
+                    entry.update({'desired_length': model.desired_length[k].item() if torch.is_tensor(model.desired_length) else model.desired_length})
+                else:
+                    # it can only be a2i2!!! because lenembadd and lenemb has to have desired_length
+                    # import pudb;pu.db
+                    print('what should I do here?')
+                    print('do nothing')
+
             if os.getenv('DESIRED_LENGTH'):
                 entry.update({'desired_caption': desired_sents[k]})
             if eval_kwargs.get('dump_path', 0) == 1:
@@ -325,6 +366,9 @@ def eval_split(model, crit, loader, eval_kwargs={}):
             break
 
     lang_stats = None
+    if not os.path.isdir('eval_results'):
+        os.mkdir('eval_results')
+    torch.save((predictions, n_predictions), os.path.join('eval_results/', '.saved_pred_'+ eval_kwargs['id'] + '_' + split + '.pth'))
     if lang_eval == 1:
         lang_stats = language_eval(dataset, predictions, n_predictions, eval_kwargs, split)
 

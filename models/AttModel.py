@@ -57,13 +57,14 @@ def pack_wrapper(module, att_feats, att_masks):
 class AttModel(CaptionModel):
     def __init__(self, opt):
         super(AttModel, self).__init__()
+        self.opt = opt
         self.vocab_size = opt.vocab_size
         self.input_encoding_size = opt.input_encoding_size
         #self.rnn_type = opt.rnn_type
         self.rnn_size = opt.rnn_size
         self.num_layers = opt.num_layers
         self.drop_prob_lm = opt.drop_prob_lm
-        self.seq_length = opt.max_length or opt.seq_length # maximum sample length
+        self.seq_length = opt.max_length or max(opt.seq_length, opt.max_length) # maximum sample length
         self.fc_feat_size = opt.fc_feat_size
         self.att_feat_size = opt.att_feat_size
         self.att_hid_size = opt.att_hid_size
@@ -74,9 +75,12 @@ class AttModel(CaptionModel):
 
         self.ss_prob = 0.0 # Schedule sampling probability
 
-        self.embed = nn.Sequential(nn.Embedding(self.vocab_size + 1, self.input_encoding_size),
-                                nn.ReLU(),
-                                nn.Dropout(self.drop_prob_lm))
+        if os.getenv('ORIGINAL_ATT', '0') == '1':
+            self.embed = nn.Sequential(nn.Embedding(self.vocab_size + 1, self.input_encoding_size),
+                                    nn.ReLU(),
+                                    nn.Dropout(self.drop_prob_lm))
+        else:
+            self.embed = nn.Embedding(self.vocab_size + 1, self.input_encoding_size)
         self.fc_embed = nn.Sequential(nn.Linear(self.fc_feat_size, self.rnn_size),
                                     nn.ReLU(),
                                     nn.Dropout(self.drop_prob_lm))
@@ -98,25 +102,36 @@ class AttModel(CaptionModel):
         if self.decide_length != 'none':
             self.seq_length += 1
             self.len_logit = nn.Linear(self.rnn_size, self.vocab_size + 1) # Doesn't need to be that long actually, but it should be fine
-            self.len_logit.bias.data[21:].fill_(float('-inf'))
+            self.len_logit.bias.data[max(21, self.seq_length + 2):].fill_(float('-inf'))
             if self.decide_length == 'simple':
                 # it is the case where the embedding of marker of all lengths are the same
                 # Omit for now
                 pass
+            elif self.decide_length == 'lenemb_predict':
+                # predict the length for lenemb model.
+                self.len_logit = nn.Sequential(self.fc_embed, self.len_logit)
             elif self.decide_length == 'marker':
-                self.len_embed = nn.Sequential(nn.Embedding(21, self.input_encoding_size),
-                                nn.ReLU(),
-                                nn.Dropout(self.drop_prob_lm))
+                # self.len_embed = nn.Sequential(nn.Embedding(21, self.input_encoding_size),
+                #                 nn.ReLU(),
+                #                 nn.Dropout(self.drop_prob_lm))
+                self.len_embed = nn.Embedding(max(21, self.seq_length + 2), self.input_encoding_size)
                 if self.__class__.__name__ == 'LenEmbModel':
                     self.bos_token = nn.Parameter(torch.randn(self.input_encoding_size * 2))
             elif self.decide_length == 'init_marker':
                 self.len_logit = nn.Sequential(self.fc_embed, self.len_logit)
-                self.len_embed = nn.Sequential(nn.Embedding(21, self.input_encoding_size),
-                                nn.ReLU(),
-                                nn.Dropout(self.drop_prob_lm))
+                # self.len_embed = nn.Sequential(nn.Embedding(max(21, self.seq_length + 2), self.input_encoding_size),
+                #                 nn.ReLU(),
+                #                 nn.Dropout(self.drop_prob_lm))
+                self.len_embed = nn.Embedding(max(21, self.seq_length + 2), self.input_encoding_size)
             elif self.decide_length == 'init':
                 self.len_logit = nn.Sequential(self.fc_embed, self.len_logit)
                 self.memory = nn.Parameter(torch.randn(self.rnn_size)*0.01)
+            else:
+                raise KeyError
+
+            if int(os.getenv('FIX_LEN_LOGIT', '0')) == 1:
+                for p in self.len_logit.parameters():
+                    p.requires_grad = False
 
         if os.getenv('LENGTH_PREDICT'):
             if 'cls' in os.getenv('LENGTH_PREDICT'):
@@ -169,12 +184,21 @@ class AttModel(CaptionModel):
         batch_size = fc_feats.size(0)
         state = self.init_hidden(batch_size)
 
+        if os.getenv('LEN_INIT_SANITY_SANITY') is not None:
+            seq[:, 1] = 0
+
+        # When decide_length == none, The leninput need to be infereed
+        # and append at the state at the first step
+        # If not, the state will be appended when the length token is fed in.
         if self.decide_length == 'none': # always input len_input.
             mask = (seq>0).float()
             mask = torch.cat([mask.new(mask.size(0), 1).fill_(1), mask[:, :-1]], 1)
             len_input = (mask.sum(1,keepdim=True) - mask.cumsum(1)).long()
             len_input = mask.sum(1).long()
-            assert (len_input == (seq>0).sum(1)+1).all()
+            try:
+                assert (len_input == (seq>0).sum(1)+1).all()
+            except:
+                import pudb;pu.db
 
             state = list(state) + [len_input.unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
 
@@ -208,32 +232,42 @@ class AttModel(CaptionModel):
             if i >= start_index and seq[:, i].sum() == 0:
                 break
 
+            # bos
             if i == 0:
                 if self.decide_length == 'marker':
                     if self.__class__.__name__ == 'LenEmbModel':
                         xt = self.bos_token.reshape(1,-1).expand(batch_size, -1)
                     else:
-                        xt = self.embed(seq[:, i])
+                        xt = self.embed(torch.zeros_like(seq[:, i]))
                     output, state = self.core(xt, p_fc_feats, p_att_feats, pp_att_feats, state, p_att_masks)
                     outputs[:, i] = F.log_softmax(self.len_logit(output))
-                elif 'init' in self.decide_length:
+                elif 'init' in self.decide_length or self.decide_length == 'lenemb_predict':
                     outputs[:, i] = F.log_softmax(self.len_logit(p_fc_feats)) # this only works only when fc_embed is itendity
                 if self.decide_length != 'none':
                     continue
-            elif i == 1:
-                if self.decide_length != 'none':
-                    # two cases, decide length model
-                    state = list(state[:2]) + [it.float().to(state[0].device).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+            elif i == 1 and self.decide_length != 'none': # if the length token
+                # two cases, decide length model
+                state = list(state[:2]) + [it.float().to(state[0].device).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
                 if 'marker' in self.decide_length:
                     it.add_(20000)
-                elif self.decide_length == 'init':
-                    if os.getenv('LEN_INIT_SANITY') is not None:
-                        it.fill_(0)
-                    state = [self.memory.reshape(1,1,-1).expand_as(state[0]) * it.unsqueeze(1).float()] + list(state)[1:]
-                    it.fill_(0)
+                else: # init lenemb_predict
+                    if self.decide_length == 'init':
+                        if os.getenv('LEN_INIT_SANITY') is not None:
+                            it.fill_(0)
+                        state = [self.memory.reshape(1,1,-1).expand_as(state[0]) * it.unsqueeze(1).float()] + list(state)[1:]
+                    it.fill_(0) # bos
                         
 
             output, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+            if self.decide_length != 'none':
+                logprobs = output
+                if hasattr(output, 'eos_change'):
+                    tmp = logprobs.new_zeros(logprobs.size())
+                    tmp[logprobs.eos_change == 1, 0] = float('-inf')
+                    tmp[logprobs.eos_change == 2, 1:] = float('-inf')
+                    logprobs = logprobs + tmp
+                output = logprobs
+            
             outputs[:, i] = output
 
         return outputs
@@ -253,57 +287,67 @@ class AttModel(CaptionModel):
             len_input = state[-1][-1][:, 0].long()
             state = state[:2]
         else:
-            if self.decide_length == 'none':
+            if self.decide_length == 'none' and not hasattr(self, 'desired_length'):
+                print('No desired length is provided to non-length-predictable model')
+                print('Use defualt length 9 or DEFAULT_LENGTH:', int(os.getenv('DEFAULT_LENGTH', 9)))
                 # When decide_length is none and len_input is not given len_input is set to 9 or desired_length or DEFUALT_LENGTH
-                len_input = torch.tensor([getattr(self, 'desired_length', int(os.getenv('DEFAULT_LENGTH', 9)))]).long().expand(fc_feats.shape[0]).to(fc_feats.device)
+                len_input = torch.tensor([int(os.getenv('DEFAULT_LENGTH', 9))]).long().expand(fc_feats.shape[0]).to(fc_feats.device)
             # elif hasattr(self, 'desired_length'):
             #     len_input = self.desired_length
 
         if self.__class__.__name__ == 'LenEmbModel':
-            xt = torch.cat([xt, self.rem_len_embed(len_input)], 1)
+            if getattr(self.opt, 'lenemb_mode', 'add') == 'cat':
+                xt = torch.cat([xt, self.rem_len_embed(len_input)], 1)
+            else:
+                xt = xt + self.rem_len_embed(len_input)
+            xt = F.dropout(xt, float(os.getenv('WE_DROPOUT', '0.1')), self.training)
+            # TODO, should we try different dropout? 0.3?
+        else:
+            # Original embed dropout of att2in2
+            xt = F.dropout(xt, float(os.getenv('WE_DROPOUT', '0.5')), self.training)
 
         output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
-        if os.getenv('LENGTH_PREDICT') and len_pred:
-            self.states.append(self.len_fc(output.detach()))
-            # self.states.append(self.len_fc(output))
+        # if os.getenv('LENGTH_PREDICT') and len_pred:
+        #     self.states.append(self.len_fc(output.detach()))
+        #     # self.states.append(self.len_fc(output))
 
         if output_logsoftmax:
             logprobs = F.log_softmax(self.logit(output), dim=1)
         else:
             logprobs = self.logit(output)
 
-        if hasattr(self, 'desired_length') and os.getenv('LENGTH_PREDICT'):
-            # print(self.vocab[str(logprobs.max(-1)[1].item())])
-            # import pdb;pdb.set_trace()
-            def obj_func(input):
-                len_obj = F.log_softmax(self.len_fc(input)).gather(1, len_input.unsqueeze(1)).squeeze(1) # higher
-                dist_obj = F.kl_div(F.log_softmax(self.logit(input), dim=1), logprobs.exp(), reduction='none')
-                # _grad_l = torch.autograd.grad(len_obj.sum(), input, retain_graph=True)[0]
-                # _grad_d = torch.autograd.grad(dist_obj.sum(), input, retain_graph=True)[0]
-                # import pdb;pdb.set_trace()
-                return (len_obj - LP_CONF['kl_w'] * dist_obj.sum(1)).sum()
+        # if hasattr(self, 'desired_length') and os.getenv('LENGTH_PREDICT'):
+        #     # print(self.vocab[str(logprobs.max(-1)[1].item())])
+        #     # import pdb;pdb.set_trace()
+        #     def obj_func(input):
+        #         len_obj = F.log_softmax(self.len_fc(input)).gather(1, len_input.unsqueeze(1)).squeeze(1) # higher
+        #         dist_obj = F.kl_div(F.log_softmax(self.logit(input), dim=1), logprobs.exp(), reduction='none')
+        #         # _grad_l = torch.autograd.grad(len_obj.sum(), input, retain_graph=True)[0]
+        #         # _grad_d = torch.autograd.grad(dist_obj.sum(), input, retain_graph=True)[0]
+        #         # import pdb;pdb.set_trace()
+        #         return (len_obj - LP_CONF['kl_w'] * dist_obj.sum(1)).sum()
 
-            def get_grad(func, input):
-                input.requires_grad = True
-                input.retain_grad()
-                with torch.enable_grad():
-                    grad = torch.autograd.grad(func(input), input)
-                input.requires_grad = False
-                return grad[0]
+        #     def get_grad(func, input):
+        #         input.requires_grad = True
+        #         input.retain_grad()
+        #         with torch.enable_grad():
+        #             grad = torch.autograd.grad(func(input), input)
+        #         input.requires_grad = False
+        #         return grad[0]
 
-            new_state = output.data.clone()
-            for i in range(LP_CONF['iter']):
-                new_state += LP_CONF['lr'] * get_grad(obj_func, new_state)
+        #     new_state = output.data.clone()
+        #     for i in range(LP_CONF['iter']):
+        #         new_state += LP_CONF['lr'] * get_grad(obj_func, new_state)
 
-            logprobs = F.log_softmax(self.logit(new_state), dim=1)
-            # print(self.vocab[str(logprobs.max(-1)[1].item())])
+        #     logprobs = F.log_softmax(self.logit(new_state), dim=1)
+        #     # print(self.vocab[str(logprobs.max(-1)[1].item())])
 
-            state[0][0].copy_(new_state)
+        #     state[0][0].copy_(new_state)
 
         if 'len_input' in locals():
             state = list(state)[:2] + [F.relu(len_input.float()-1).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
         if int(os.getenv('CONSTRAINED', 0)):
-            logprobs.eos_change = (len_input - 1 >= 0) + (len_input - 1 == 0)
+            logprobs.eos_change = (len_input - 1 >= 0).long() + (len_input - 1 == 0).long()
         
         return logprobs, state
 
@@ -314,8 +358,8 @@ class AttModel(CaptionModel):
         p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
 
         assert beam_size <= self.vocab_size + 1, 'lets assume this for now, otherwise this corner case causes a few headaches down the road. can be dealt with in future if needed'
-        seq = torch.LongTensor(self.seq_length, batch_size).zero_()
-        seqLogprobs = torch.FloatTensor(self.seq_length, batch_size, self.vocab_size + 1)
+        seq = torch.LongTensor(self.seq_length+int(self.decide_length != 'none'), batch_size).zero_()
+        seqLogprobs = torch.FloatTensor(self.seq_length+int(self.decide_length != 'none'), batch_size, self.vocab_size + 1)
         # lets process every image independently for now, for simplicity
 
         self.done_beams = [[] for _ in range(batch_size)]
@@ -326,24 +370,86 @@ class AttModel(CaptionModel):
             tmp_p_att_feats = pp_att_feats[k:k+1].expand(*((beam_size,)+pp_att_feats.size()[1:])).contiguous()
             tmp_att_masks = p_att_masks[k:k+1].expand(*((beam_size,)+p_att_masks.size()[1:])).contiguous() if att_masks is not None else None
 
-            if hasattr(self, 'desired_length') and getattr(self, 'decide_length', 'none') == 'none':
-                state = list(state)[:2] + [state[0].new_tensor([self.desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+            if hasattr(self, 'desired_length') and torch.is_tensor(self.desired_length):
+                _desired_length = self.desired_length[k:k+1].expand(beam_size)
+            elif hasattr(self, 'desired_length'):
+                _desired_length = self.desired_length
+
 
             for t in range(1):
                 if t == 0: # input <bos>
                     it = fc_feats.new_zeros([beam_size], dtype=torch.long)
+                # if t == 1 and self.decide_length != 'none': # Length token!!!!
+                #     if hasattr(self, 'desired_length'):
+                #         import pudb;pu.db
+                #         # Add current length to state
+                #         if torch.is_tensor(_desired_length):
+                #             state = list(state)[:2] + [_desired_length.to(state[0].device).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+                #         else:
+                #             state = list(state)[:2] + [state[0].new_tensor([_desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+                #     else:
+                #         # Use predicted length
+                #         state = list(state[:2]) + [it.float().to(state[0].device).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+                #     if 'marker' in self.decide_length:
+                #         if hasattr(self, 'desired_length'):
+                #             if type(self.desired_length) is int:
+                #                 it.fill_(_desired_length)
+                #             else:
+                #                 it.copy_(_desired_length)
+                #         else:
+                #             print('The model will use its own predicted length')
+                #         it.add_(20000)
+                #     else: # init, lenemb_predict
+                #         if self.decide_length == 'init':
+                #             if os.getenv('LEN_INIT_SANITY') is not None:
+                #                 it.fill_(0)
+                #             if not hasattr(self, 'desired_length'):
+                #                 state = [self.memory.reshape(1,1,-1).expand_as(state[0]) * it.unsqueeze(1).float()] + list(state)[1:]
+                #         it.fill_(0) # bos
+
 
                 if t == 0 and self.decide_length != 'none':
                     if self.decide_length == 'marker':
                         if self.__class__.__name__ == 'LenEmbModel':
                             xt = self.bos_token.reshape(1,-1).expand(batch_size, -1)
                         else:
-                            xt = self.embed(seq[0])
+                            xt = self.embed(it)
                         output, state = self.core(xt, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, state, tmp_att_masks)
                         logprobs = F.log_softmax(self.len_logit(output))
-                    elif 'init' in self.decide_length:
-                        logprobs = F.log_softmax(self.len_logit(p_fc_feats), dim=1)
+                    elif 'init' in self.decide_length or self.decide_length == 'lenemb_predict': # init, init_marker 'lenemb_predict'
+                        logprobs = F.log_softmax(self.len_logit(tmp_fc_feats), dim=1)
+                    if int(os.getenv('UNIFORM_LENGTH', '0')) == 1 and self.training:
+                        # uniform from 8 - 16
+                        logprobs = torch.zeros_like(logprobs)
+                        logprobs[:, :8] = float('-inf')
+                        logprobs[:, self.seq_length+1:] = float('-inf')
+                        logprobs = F.log_softmax(logprobs)
+                    if int(os.getenv('LENGTH_SAMPLE', '0')) == 1:
+                        assert int(os.getenv('SAME_LENGTH', '0')) == 1
+                        _it = torch.distributions.Categorical(logits=logprobs.detach()).sample()
+                        assert _it.shape[0] == beam_size
+                        logprobs[:, :_it[0]] = float('-inf')
+                        logprobs[:, _it[0]+1:] = float('-inf')
+
+                    # Append to state after the first token
+                    if hasattr(self, 'desired_length'):
+                        if self.__class__.__name__ == 'TransformerModel':
+                            print('maybe error here!!!!')
+                            print(0/0)
+                        if torch.is_tensor(_desired_length):
+                            state = list(state)[:2] + [_desired_length.to(state[0].device).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+                        else:
+                            state = list(state)[:2] + [state[0].new_tensor([_desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
                 else:
+                    if hasattr(self, 'desired_length'):
+                        if self.__class__.__name__ == 'TransformerModel':
+                            print('maybe error here!!!!')
+                            print(0/0)
+                        if torch.is_tensor(_desired_length):
+                            state = list(state)[:2] + [_desired_length.to(state[0].device).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+                        else:
+                            state = list(state)[:2] + [state[0].new_tensor([_desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
+
                     logprobs, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state)
 
             self.done_beams[k] = self.beam_search(state, logprobs, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, opt=opt)
@@ -360,7 +466,7 @@ class AttModel(CaptionModel):
         sample_n = int(opt.get('sample_n', 1))
         output_logsoftmax = opt.get('output_logsoftmax', 1)
         decoding_constraint = opt.get('decoding_constraint', 0)
-        block_trigrams = opt.get('block_trigrams', 0)
+        block_trigrams = opt.get('block_trigrams', 0) or int(os.getenv('BLOCK_TRIGRAMS', '0'))
         len_pred = opt.get('len_pred', 0)
         if beam_size > 1:
             return self._sample_beam(fc_feats, att_feats, att_masks, opt)
@@ -381,9 +487,9 @@ class AttModel(CaptionModel):
 
         trigrams = [] # will be a list of batch_size dictionaries
         
-        seq = fc_feats.new_zeros((batch_size*sample_n, self.seq_length), dtype=torch.long)
-        seqLogprobs = fc_feats.new_zeros(batch_size*sample_n, self.seq_length, self.vocab_size + 1)
-        for t in range(self.seq_length + 1):
+        seq = fc_feats.new_zeros((batch_size*sample_n, self.seq_length+int(self.decide_length != 'none')), dtype=torch.long)
+        seqLogprobs = fc_feats.new_zeros(batch_size*sample_n, self.seq_length+int(self.decide_length != 'none'), self.vocab_size + 1)
+        for t in range(self.seq_length + 1 + int(self.decide_length != 'none')):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size*sample_n, dtype=torch.long)
 
@@ -392,20 +498,29 @@ class AttModel(CaptionModel):
             else:
                 start_offset = 0
 
-            if t == 1 and self.decide_length != 'none':
+            if t == 1 and self.decide_length != 'none': # Length token!!!!
                 if hasattr(self, 'desired_length'):
                     # Add current length to state
                     state = list(state[:2]) + [state[0].new_tensor([self.desired_length]).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
                 else:
+                    # Use predicted length
                     state = list(state[:2]) + [it.float().to(state[0].device).unsqueeze(0).unsqueeze(2).expand(state[0].shape)]
-                if 'marker' in self.decide_length:
+                if 'marker' in self.decide_length: # init_marker, marker
                     if hasattr(self, 'desired_length'):
-                        it.fill_(self.desired_length)
+                        if type(self.desired_length) is int:
+                            it.fill_(self.desired_length)
+                        else:
+                            it.copy_(self.desired_length)
+                    assert (state[-1][0][:,0] == it).all()
                     it.add_(20000)
-                elif self.decide_length == 'init':
-                    if os.getenv('LEN_INIT_SANITY') is not None:
-                        it.fill_(0)
-                    state = [self.memory.reshape(1,1,-1).expand_as(state[0]) * it.unsqueeze(1).float()] + list(state)[1:]
+                else:
+                    if self.decide_length == 'init': # init, lenemb_predict
+                        if os.getenv('LEN_INIT_SANITY') is not None:
+                            it.fill_(0)
+                        if not hasattr(self, 'desired_length'):
+                            state = [self.memory.reshape(1,1,-1).expand_as(state[0]) * it.unsqueeze(1).float()] + list(state)[1:]
+                        else:
+                            state = [self.memory.reshape(1,1,-1).expand_as(state[0]) * state[-1][0][:, 0].unsqueeze(1).float()] + list(state)[1:]
                     it.fill_(0)
 
             if t == 0 and self.decide_length != 'none':
@@ -416,8 +531,13 @@ class AttModel(CaptionModel):
                         xt = self.embed(seq[:, t].clone()) # all zero
                     output, state = self.core(xt, p_fc_feats, p_att_feats, pp_att_feats, state, p_att_masks)
                     logprobs = self.len_logit(output)
-                elif 'init' in self.decide_length:
+                elif 'init' in self.decide_length or self.decide_length == 'lenemb_predict':
                     logprobs = self.len_logit(p_fc_feats)
+                if int(os.getenv('UNIFORM_LENGTH', '0')) == 1 and self.training:
+                    # uniform from 8 - self.seq_length
+                    logprobs = torch.zeros_like(logprobs)
+                    logprobs[:, :8] = float('-inf')
+                    logprobs[:, self.seq_length+1:] = float('-inf')
                 if output_logsoftmax:
                     logprobs = F.log_softmax(logprobs, 1)
             else:
@@ -426,7 +546,7 @@ class AttModel(CaptionModel):
             if hasattr(logprobs, 'eos_change'):
                 tmp = logprobs.new_zeros(logprobs.size())
                 tmp[logprobs.eos_change == 1, 0] = float('-inf')
-                tmp[logprobs.eos_change == 2, 0] = 10000
+                tmp[logprobs.eos_change == 2, 1:] = float('-inf')
                 logprobs = logprobs + tmp
 
             if decoding_constraint and t > 0+start_offset:
@@ -441,16 +561,16 @@ class AttModel(CaptionModel):
                 for i in range(batch_size): # = seq.size(0)
                     prev_two = (prev_two_batch[i][0].item(), prev_two_batch[i][1].item())
                     current  = seq[i][t-1]
-                    if t == 3: # initialize
+                    if t == 3+start_offset: # initialize
                         trigrams.append({prev_two: [current]}) # {LongTensor: list containing 1 int}
-                    elif t > 3:
+                    elif t > 3+start_offset:
                         if prev_two in trigrams[i]: # add to list
                             trigrams[i][prev_two].append(current)
                         else: # create list
                             trigrams[i][prev_two] = [current]
                 # Block used trigrams at next step
                 prev_two_batch = seq[:,t-2:t]
-                mask = torch.zeros(logprobs.size(), requires_grad=False).cuda() # batch_size x vocab_size
+                mask = torch.zeros_like(logprobs) # batch_size x vocab_size
                 for i in range(batch_size):
                     prev_two = (prev_two_batch[i][0].item(), prev_two_batch[i][1].item())
                     if prev_two in trigrams[i]:
@@ -462,9 +582,10 @@ class AttModel(CaptionModel):
                 logprobs = logprobs + (mask * -0.693 * alpha) # ln(1/2) * alpha (alpha -> infty works best)
 
             # sample the next word
-            if t == self.seq_length: # skip if we achieve maximum length
+            if t == self.seq_length + int(self.decide_length != 'none'): # skip if we achieve maximum length
                 break
-            if sample_max:
+
+            if sample_max and (not (t==0 and self.decide_length != 'none' and int(os.getenv('LENGTH_SAMPLE', '0')) == 1)):
                 sampleLogprobs, it = torch.max(logprobs.data, 1)
                 it = it.view(-1).long()
             elif sample_max == 2: # gumbel softmax
@@ -477,10 +598,20 @@ class AttModel(CaptionModel):
                     return F.softmax(y / temperature, dim=-1)
                 _logprobs = gumbel_softmax_sample(logprobs, temperature)
                 _, it = torch.max(_logprobs.data, 1)
-                sampleLogprobs = logprobs.gather(1, it.unsqueeze(1)) # gather the logprobs at sampled positions
+                # sampleLogprobs = logprobs.gather(1, it.unsqueeze(1)) # gather the logprobs at sampled positions
             else:
                 it = torch.distributions.Categorical(logits=logprobs.detach() / temperature).sample()
-                sampleLogprobs = logprobs.gather(1, it.unsqueeze(1)) # gather the logprobs at sampled positions
+                # I guess it may help??????????????????????? always generate same length sample for each image.
+                if t == 0 and self.decide_length != 'none' and int(os.getenv('SAME_LENGTH', '0')) == 1:
+                    # seq_per_img = self.opt.seq_per_img * sample_n
+                    seq_per_img = batch_size // self.opt.batch_size
+                    if self.training:
+                        assert seq_per_img == 5
+                    else:
+                        assert seq_per_img == 1
+                    it = it[::seq_per_img]
+                    it = torch.stack([it]*seq_per_img, -1).reshape(-1)
+                # sampleLogprobs = logprobs.gather(1, it.unsqueeze(1)) # gather the logprobs at sampled positions
 
             # stop when all finished
             if t < 0 + start_offset:
@@ -1025,10 +1156,13 @@ class LMModel(AttModel):
 class LenEmbModel(Att2in2Model): 
     def __init__(self, opt):
         super(LenEmbModel, self).__init__(opt)
-        self.rem_len_embed = nn.Sequential(nn.Embedding(21, self.input_encoding_size),
-                                nn.ReLU(),
-                                nn.Dropout(self.drop_prob_lm))
+        # self.rem_len_embed = nn.Sequential(nn.Embedding(21, self.input_encoding_size),
+        #                         nn.ReLU(),
+        #                         nn.Dropout(self.drop_prob_lm))
+        self.rem_len_embed = nn.Embedding(max(21, self.seq_length + 2), self.input_encoding_size)
 
-        opt.input_encoding_size = self.input_encoding_size * 2
+        if getattr(opt, 'lenemb_mode', 'add') == 'cat':
+            opt.input_encoding_size = self.input_encoding_size * 2
+
         self.core = Att2in2Core(opt)
         opt.input_encoding_size = self.input_encoding_size

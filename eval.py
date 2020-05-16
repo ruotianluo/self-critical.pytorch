@@ -18,6 +18,9 @@ import argparse
 import misc.utils as utils
 import torch
 
+from detectron2.utils.env import seed_all_rng
+seed_all_rng(1234)
+
 # Input arguments and options
 parser = argparse.ArgumentParser()
 # Input paths
@@ -46,7 +49,7 @@ parser.add_argument('--sample_max', type=int, default=1,
                 help='1 = sample argmax words. 0 = sample from distributions.')
 parser.add_argument('--beam_size', type=int, default=2,
                 help='used when sample_max = 1, indicates number of beams in beam search. Usually 2 or 3 works well. More is not better. Set this to 1 for faster runtime but a bit worse performance.')
-parser.add_argument('--max_length', type=int, default=20,
+parser.add_argument('--max_length', type=int, default=30,
                 help='Maximum length during sampling')
 parser.add_argument('--length_penalty', type=str, default='',
                 help='wu_X or avg_X, X is the alpha')
@@ -64,8 +67,8 @@ parser.add_argument('--decoding_constraint', type=int, default=0,
                 help='If 1, not allowing same word in a row')
 parser.add_argument('--block_trigrams', type=int, default=0,
                 help='block repeated trigram.')
-parser.add_argument('--remove_bad_endings', type=int, default=0,
-                help='Remove bad endings')
+parser.add_argument('--remove_bad_enddings', type=int, default=0,
+                help='Remove bad enddings')
 # For evaluation on a folder of images:
 parser.add_argument('--image_folder', type=str, default='', 
                 help='If this is nonempty then will predict on the images in this folder path')
@@ -96,10 +99,17 @@ parser.add_argument('--verbose_loss', type=int, default=0,
 parser.add_argument('--eval_oracle', type=int, default=1, 
                 help='if we need to calculate loss.')
 
+
+
+parser.add_argument('--only_lang_eval', type=int, default=0,
+                help='lang eval on saved results')
+parser.add_argument('--force', type=int, default=0,
+                help='force to evaluate no matter if there are results available')
+
 opt = parser.parse_args()
 
 # Load infos
-with open(opt.infos_path) as f:
+with open(opt.infos_path, 'rb') as f:
     infos = utils.pickle_load(f)
 
 # override and collect parameters
@@ -114,7 +124,7 @@ if opt.batch_size == 0:
     opt.batch_size = infos['opt'].batch_size
 if len(opt.id) == 0:
     opt.id = infos['opt'].id
-ignore = ["id", "batch_size", "beam_size", "start_from", "language_eval", "block_trigrams", "sample_n"]
+ignore = ["id", "batch_size", "beam_size", "start_from", "language_eval", "sample_n", "block_trigrams"]
 
 for k in vars(infos['opt']).keys():
     if k not in ignore:
@@ -125,8 +135,44 @@ for k in vars(infos['opt']).keys():
 
 vocab = infos['vocab'] # ix -> word mapping
 
-# Setup the model
+pred_fn = os.path.join('eval_results/', '.saved_pred_'+ opt.id + '_' + opt.split + '.pth')
+result_fn = os.path.join('eval_results/', opt.id + '_' + opt.split + '.json')
+
+
+if opt.only_lang_eval == 1 or (not opt.force and os.path.isfile(pred_fn)): 
+    # if results existed, then skip, unless force is on
+    if not opt.force:
+        try:
+            if os.path.isfile(result_fn):
+                print(result_fn)
+                json.load(open(result_fn, 'r'))
+                print('already evaluated')
+                os._exit(0)
+        except:
+            pass
+
+    predictions, n_predictions = torch.load(pred_fn)
+    lang_stats = eval_utils.language_eval(opt.input_json, predictions, n_predictions, vars(opt), opt.split)
+    print(lang_stats)
+    os._exit(0)
+
+# At this point only_lang_eval if 0
+if not opt.force:
+    # Check out if 
+    try:
+        # if no pred exists, then continue
+        tmp = torch.load(pred_fn)
+        # if language_eval == 1, and no pred exists, then continue
+        if opt.language_eval == 1:
+            json.load(open(result_fn, 'r'))
+        print('Result is already there')
+        os._exit(0)
+    except:
+        pass
+
+opt.vocab = vocab
 model = models.setup(opt)
+del opt.vocab
 model.load_state_dict(torch.load(opt.model))
 model.cuda()
 model.eval()

@@ -14,6 +14,8 @@ import torch.nn.functional as F
 
 import six
 from six.moves import cPickle
+import logging
+from detectron2.utils.logger import log_first_n
 
 bad_endings = ['with','in','on','of','a','at','to','for','an','this','his','her','that']
 bad_endings += ['the']
@@ -101,26 +103,38 @@ class RewardCriterion(nn.Module):
 
         return output
 
+
 class StructureLosses(nn.Module):
+    """
+    This loss is inspired by Classical Structured Prediction Losses for Sequence to Sequence Learning (Edunov et al., 2018).
+    """
     def __init__(self, opt):
         super(StructureLosses, self).__init__()
         self.opt = opt
         self.loss_type = opt.structure_loss_type
 
-    def forward(self, input, seq, data):
+    def forward(self, input, seq, data_gts):
         """
         Input is either logits or log softmax
         """
-        batch_size = input.size(0)# batch_size = sample_size * seq_per_img
-        seq_per_img = batch_size // len(data['gts'])
+        out = {}
 
-        assert seq_per_img == self.opt.seq_per_img * self.opt.structure_sample_n, seq_per_img
+        batch_size = input.size(0)# batch_size = sample_size * seq_per_img
+        seq_per_img = batch_size // len(data_gts)
+
+        assert seq_per_img == self.opt.train_sample_n * seq_per_img
 
         mask = (seq>0).float()
+        log_first_n(
+            logging.WARNING,
+            'Assuming eos and padding are zero here',
+            n=1,
+        )
         mask = torch.cat([mask.new_full((mask.size(0), 1), 1), mask[:, :-1]], 1)
         
-        scores = get_scores(data, seq, self.opt)
+        scores = get_scores(data_gts, seq, self.opt)
         scores = torch.from_numpy(scores).type_as(input).view(-1, seq_per_img)
+        out['reward'] = scores #.mean()
         if self.opt.entropy_reward_weight > 0:
             entropy = - (F.softmax(input, dim=2) * F.log_softmax(input, dim=2)).sum(2).data
             entropy = (entropy * mask).sum(1) / mask.sum(1)
@@ -154,6 +168,7 @@ class StructureLosses(nn.Module):
 
             output = (F.softmax(input.exp()) * costs).sum(1).mean()
 
+            # test
             # avg_scores = input
             # probs = F.softmax(avg_scores.exp_())
             # loss = (probs * costs.type_as(probs)).sum() / input.size(0)
@@ -170,7 +185,7 @@ class StructureLosses(nn.Module):
             output = F.relu(costs - costs_star - input_star + input).max(1)[0] / 2
             output = output.mean()
 
-            # sanity
+            # sanity test
             # avg_scores = input + costs
             # scores_with_high_target = avg_scores.clone()
             # scores_with_high_target.scatter_(1, costs.min(1)[1].view(-1, 1), 1e10)
@@ -192,7 +207,7 @@ class StructureLosses(nn.Module):
             output = F.relu(costs - costs_star - input_star + input)
             output = output.mean()
 
-            # sanity
+            # sanity test
             # avg_scores = input + costs
             # loss = F.multi_margin_loss(avg_scores, costs.min(1)[1], margin=0)
             # print(output, loss)
@@ -209,6 +224,8 @@ class StructureLosses(nn.Module):
 
         elif self.loss_type == 'real_softmax_margin':
             # input is logits
+            # This is what originally defined in Kevin's paper
+            # The result should be equivalent to softmax_margin
             input = input * mask
             input = input.sum(1) / mask.sum(1)
             input = input.view(-1, seq_per_img)
@@ -217,22 +234,163 @@ class StructureLosses(nn.Module):
             target = costs.min(1)[1]
             output = F.cross_entropy(input, target)
 
-        elif self.loss_type == 'policy_gradient':
-            # None:
-            # This is not standard pg, because the baseline is dependant on the reward
-            # This is eccenstially a rescaled reward. See how it works.
-            # output = input * mask * (costs - costs.mean(1, keepdim=True)).view(-1, 1) not working
-            # output = input * mask * ((costs - costs.mean(1, keepdim=True))/(costs.std(1, keepdim=True)+1e-7)).view(-1, 1)
-            # output = input * mask * costs.view(-1, 1)
-            # output = input * mask * (costs.view(-1, 1)-0.5)
-            # costs = -scores
-            # output = input * mask * ((costs - costs.mean())/costs.std()).view(-1, 1)
-            # output = - input * mask * scores.view(-1, 1)
-            # output = - input * mask * (scores - scores.min(1, keepdim=True)[0]).view(-1, 1)
-            output = - input * mask * (scores - scores.median(1, keepdim=True)[0]).view(-1, 1)
-            output = torch.sum(output) / torch.sum(mask)
+        elif self.loss_type == 'new_self_critical':
+            """
+            A different self critical
+            Self critical uses greedy decoding score as baseline;
+            This setting uses the average score of the rest samples as baseline
+            (suppose c1...cn n samples, reward1 = score1 - 1/(n-1)(score2+..+scoren) )
+            """
+            baseline = (scores.sum(1, keepdim=True) - scores) / (scores.shape[1] - 1)
+            scores = scores - baseline
+            # self cider used as reward to promote diversity (not working that much in this way)
+            if getattr(self.opt, 'self_cider_reward_weight', 0) > 0:
+                _scores = get_self_cider_scores(data_gts, seq, self.opt)
+                _scores = torch.from_numpy(_scores).type_as(scores).view(-1, 1)
+                _scores = _scores.expand_as(scores - 1)
+                scores += self.opt.self_cider_reward_weight * _scores
+            if int(os.getenv('M2_loss', 0)) == 1:
+                output = (-torch.mean(input * mask, -1) * scores.view(-1)).mean()
+            else:
+                output = - input * mask * scores.view(-1, 1)
+                output = torch.sum(output) / torch.sum(mask)
 
-        return output
+        out['loss'] = output
+        return out
+
+
+# class StructureLosses(nn.Module):
+#     def __init__(self, opt):
+#         super(StructureLosses, self).__init__()
+#         self.opt = opt
+#         self.loss_type = opt.structure_loss_type
+
+#     def forward(self, input, seq, data):
+#         """
+#         Input is either logits or log softmax
+#         """
+#         batch_size = input.size(0)# batch_size = sample_size * seq_per_img
+#         seq_per_img = batch_size // len(data['gts'])
+
+#         assert seq_per_img == self.opt.seq_per_img * self.opt.structure_sample_n, seq_per_img
+
+#         mask = (seq>0).float()
+#         mask = torch.cat([mask.new_full((mask.size(0), 1), 1), mask[:, :-1]], 1)
+        
+#         scores = get_scores(data, seq, self.opt)
+#         scores = torch.from_numpy(scores).type_as(input).view(-1, seq_per_img)
+#         if self.opt.entropy_reward_weight > 0:
+#             entropy = - (F.softmax(input, dim=2) * F.log_softmax(input, dim=2)).sum(2).data
+#             entropy = (entropy * mask).sum(1) / mask.sum(1)
+#             print('entropy', entropy.mean().item())
+#             scores = scores + self.opt.entropy_reward_weight * entropy.view(-1, seq_per_img)
+#         # rescale cost to [0,1]
+#         costs = - scores
+#         if self.loss_type == 'risk' or self.loss_type == 'softmax_margin': 
+#             costs = costs - costs.min(1, keepdim=True)[0]
+#             costs = costs / costs.max(1, keepdim=True)[0]
+#         # in principle
+#         # Only risk need such rescale
+#         # margin should be alright; Let's try.
+
+#         # Gather input: BxTxD -> BxT
+#         input = input.gather(2, (seq % 20000).unsqueeze(2)).squeeze(2)
+
+#         if self.loss_type == 'seqnll':
+#             # input is logsoftmax
+#             input = input * mask
+#             input = input.sum(1) / mask.sum(1)
+#             input = input.view(-1, seq_per_img)
+
+#             target = costs.min(1)[1]
+#             output = F.cross_entropy(input, target)
+#         elif self.loss_type == 'risk':
+#             # input is logsoftmax
+#             input = input * mask
+#             input = input.sum(1)
+#             input = input.view(-1, seq_per_img)
+
+#             output = (F.softmax(input.exp()) * costs).sum(1).mean()
+
+#             # avg_scores = input
+#             # probs = F.softmax(avg_scores.exp_())
+#             # loss = (probs * costs.type_as(probs)).sum() / input.size(0)
+#             # print(output.item(), loss.item())            
+
+#         elif self.loss_type == 'max_margin':
+#             # input is logits
+#             input = input * mask
+#             input = input.sum(1) / mask.sum(1)
+#             input = input.view(-1, seq_per_img)
+#             _, __ = costs.min(1, keepdim=True)
+#             costs_star = _
+#             input_star = input.gather(1, __)
+#             output = F.relu(costs - costs_star - input_star + input).max(1)[0] / 2
+#             output = output.mean()
+
+#             # sanity
+#             # avg_scores = input + costs
+#             # scores_with_high_target = avg_scores.clone()
+#             # scores_with_high_target.scatter_(1, costs.min(1)[1].view(-1, 1), 1e10)
+
+#             # target_and_offender_index = scores_with_high_target.sort(1, True)[1][:, 0:2]
+#             # avg_scores = avg_scores.gather(1, target_and_offender_index)
+#             # target_index = avg_scores.new_zeros(avg_scores.size(0), dtype=torch.long)
+#             # loss = F.multi_margin_loss(avg_scores, target_index, size_average=True, margin=0)
+#             # print(loss.item() * 2, output.item()) 
+
+#         elif self.loss_type == 'multi_margin':
+#             # input is logits
+#             input = input * mask
+#             input = input.sum(1) / mask.sum(1)
+#             input = input.view(-1, seq_per_img)
+#             _, __ = costs.min(1, keepdim=True)
+#             costs_star = _
+#             input_star = input.gather(1, __)
+#             output = F.relu(costs - costs_star - input_star + input)
+#             output = output.mean()
+
+#             # sanity
+#             # avg_scores = input + costs
+#             # loss = F.multi_margin_loss(avg_scores, costs.min(1)[1], margin=0)
+#             # print(output, loss)
+
+#         elif self.loss_type == 'softmax_margin':
+#             # input is logsoftmax
+#             input = input * mask
+#             input = input.sum(1) / mask.sum(1)
+#             input = input.view(-1, seq_per_img)
+
+#             input = input + costs
+#             target = costs.min(1)[1]
+#             output = F.cross_entropy(input, target)
+
+#         elif self.loss_type == 'real_softmax_margin':
+#             # input is logits
+#             input = input * mask
+#             input = input.sum(1) / mask.sum(1)
+#             input = input.view(-1, seq_per_img)
+
+#             input = input + costs
+#             target = costs.min(1)[1]
+#             output = F.cross_entropy(input, target)
+
+#         elif self.loss_type == 'policy_gradient':
+#             # None:
+#             # This is not standard pg, because the baseline is dependant on the reward
+#             # This is eccenstially a rescaled reward. See how it works.
+#             # output = input * mask * (costs - costs.mean(1, keepdim=True)).view(-1, 1) not working
+#             # output = input * mask * ((costs - costs.mean(1, keepdim=True))/(costs.std(1, keepdim=True)+1e-7)).view(-1, 1)
+#             # output = input * mask * costs.view(-1, 1)
+#             # output = input * mask * (costs.view(-1, 1)-0.5)
+#             # costs = -scores
+#             # output = input * mask * ((costs - costs.mean())/costs.std()).view(-1, 1)
+#             # output = - input * mask * scores.view(-1, 1)
+#             # output = - input * mask * (scores - scores.min(1, keepdim=True)[0]).view(-1, 1)
+#             output = - input * mask * (scores - scores.median(1, keepdim=True)[0]).view(-1, 1)
+#             output = torch.sum(output) / torch.sum(mask)
+
+#         return output
 
 class LanguageModelCriterion(nn.Module):
     def __init__(self):
@@ -417,3 +575,24 @@ def get_std_opt(model, factor=1, warmup=2000):
     return NoamOpt(model.model.tgt_embed[0].d_model, factor, warmup,
             torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9))
     
+
+
+
+def save_checkpoint(opt, model, infos, optimizer, histories=None, append=''):
+    if len(append) > 0:
+        append = '-' + append
+    # if checkpoint_path doesn't exist
+    if not os.path.isdir(opt.checkpoint_path):
+        os.makedirs(opt.checkpoint_path)
+    checkpoint_path = os.path.join(opt.checkpoint_path, 'model%s.pth' %(append))
+    torch.save(model.state_dict(), checkpoint_path)
+    print("model saved to {}".format(checkpoint_path))
+    optimizer_path = os.path.join(opt.checkpoint_path, 'optimizer%s.pth' %(append))
+    torch.save(optimizer.state_dict(), optimizer_path)
+    with open(os.path.join(opt.checkpoint_path, 'infos_'+opt.id+'%s.pkl' %(append)), 'wb') as f:
+        pickle_dump(infos, f)
+    if histories:
+        with open(os.path.join(opt.checkpoint_path, 'histories_'+opt.id+'%s.pkl' %(append)), 'wb') as f:
+            pickle_dump(histories, f)
+
+
